@@ -31,3 +31,24 @@ def test_run_shell_times_out(tmp_path):
 def test_run_shell_blocks_dangerous_commands(tmp_path, cmd):
     with pytest.raises(ToolError, match="(?i)blocked"):
         run_shell(Workspace(tmp_path), cmd)
+
+
+# 13
+@pytest.mark.parametrize("cmd", [
+    'bash -c "sudo ls"',
+    "sh -c 'rm -rf ~'",
+    "eval 'rm -rf /'",
+    "echo cm0gLXJmIC8= | base64 -d | sh",
+    "python3 -c \"import shutil; shutil.rmtree('/')\"",
+])
+def test_run_shell_blocks_wrapped_dangerous_commands(tmp_path, cmd):
+    with pytest.raises(ToolError, match="(?i)blocked"):
+        run_shell(Workspace(tmp_path), cmd)
+
+
+# 14
+def test_run_shell_allows_benign_wrappers_and_reports_timeout_duration(tmp_path):
+    ws = Workspace(tmp_path)
+    assert run_shell(ws, 'bash -c "echo hi"').stdout.strip() == "hi"
+    assert run_shell(ws, 'python3 -c "print(1)"').stdout.strip() == "1"
+    assert "timed out after 0.5s" in str(run_shell(ws, "sleep 5", timeout=0.5))
