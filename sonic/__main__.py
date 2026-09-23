@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.web:
         from sonic.web import create_app
-        app = create_app(ws, planner, port=args.port, yolo=args.yolo)
+        app = create_app(ws, planner, port=args.port, yolo=args.yolo, context=graph)
         print(banner(ws, args.yolo, args.planner))
         print(f"web UI: {app.url}  (Ctrl-C to stop)")
         try:
