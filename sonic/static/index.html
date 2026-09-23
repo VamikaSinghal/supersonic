@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="sonic-token" content="{{TOKEN}}">
+<meta name="color-scheme" content="light dark">
+<title>Supersonic</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f6; --border: #e1e4ea; --text: #16181d;
+  --muted: #5f6673; --accent: #4f46e5; --accent-fg: #ffffff; --accent-soft: #eef0ff;
+  --ok: #1a7f37; --ok-soft: #e6f4ea; --bad: #c62828; --bad-soft: #fdecec; --warn: #9a6700; --warn-soft: #fff6dc;
+  --add-bg: #e6ffec; --add-fg: #116329; --del-bg: #ffebe9; --del-fg: #a40e26; --hunk: #6e56cf;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1116; --panel: #161a21; --panel-2: #1c212a; --border: #2a303b; --text: #e6e8ec;
+    --muted: #9aa3b2; --accent: #8b87ff; --accent-fg: #0e1116; --accent-soft: #23234a;
+    --ok: #3fb950; --ok-soft: #12261a; --bad: #f47067; --bad-soft: #2d1517; --warn: #d4a72c; --warn-soft: #2b2410;
+    --add-bg: #12261a; --add-fg: #7ee787; --del-bg: #2d1517; --del-fg: #ffa198; --hunk: #b4a7ff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); display: flex; flex-direction: column; }
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
+
+/* header */
+header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--border); }
+.bar { max-width: 900px; margin: 0 auto; padding: 10px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; letter-spacing: -.01em; }
+.brand svg { color: var(--accent); }
+.ws { flex: 1 1 200px; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.ws bdi { direction: ltr; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); white-space: nowrap; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.pill.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.pill.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.conn.off .dot { animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .2; } }
+
+/* timeline */
+main { flex: 1; width: 100%; max-width: 900px; margin: 0 auto; padding: 18px 16px 24px; }
+.empty { text-align: center; color: var(--muted); padding: 48px 12px; }
+.empty h1 { color: var(--text); font-size: 20px; margin: 0 0 6px; letter-spacing: -.01em; }
+.empty p { margin: 4px 0; }
+.run { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 16px; overflow: hidden; }
+.run-head { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.run-head .caret { color: var(--accent); font-weight: 700; font-family: var(--mono); }
+.run-head .text { flex: 1; min-width: 0; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-head .status { font-size: 12px; color: var(--muted); white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.run-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.note { color: var(--muted); font-size: 13px; padding: 6px 12px; text-align: center; }
+.note.sys { background: var(--panel); border: 1px dashed var(--border); border-radius: var(--radius); margin-bottom: 16px; overflow-wrap: anywhere; }
+
+.step { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.step > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; border-radius: 8px; min-width: 0; }
+.step > summary::-webkit-details-marker { display: none; }
+.step > summary:hover { background: var(--panel-2); }
+.mark { font-weight: 700; width: 1em; text-align: center; flex: none; }
+.step.ok .mark { color: var(--ok); } .step.bad .mark { color: var(--bad); }
+.tool { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--accent); background: var(--accent-soft); padding: 0 6px; border-radius: 4px; flex: none; }
+.sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sum .first { color: var(--muted); }
+.chev { color: var(--muted); flex: none; transition: transform .15s; font-size: 11px; }
+.step[open] .chev { transform: rotate(90deg); }
+.obs { margin: 0; padding: 10px 12px; border-top: 1px solid var(--border); background: var(--panel-2); max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 0 0 8px 8px; }
+
+.final { padding: 8px 12px; border-radius: 8px; background: var(--panel-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.final.err { background: var(--bad-soft); color: var(--bad); }
+.working { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; padding: 4px 10px; }
+
+.approval { border: 1px solid var(--warn); border-radius: 8px; background: var(--warn-soft); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.approval.done { border-color: var(--border); background: var(--panel); }
+.approval .ttl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; }
+.approval .preview { overflow-wrap: anywhere; color: var(--muted); }
+.diff, .cmd { margin: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); overflow: auto; max-height: 360px; }
+.diff span { display: block; padding: 0 10px; white-space: pre; min-height: 1.5em; }
+.diff .add { background: var(--add-bg); color: var(--add-fg); }
+.diff .del { background: var(--del-bg); color: var(--del-fg); }
+.diff .hunk { color: var(--hunk); }
+.diff .meta { color: var(--muted); font-weight: 600; }
+.cmd { padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmd::before { content: "$ "; color: var(--muted); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.outcome { font-weight: 600; font-size: 13px; }
+.outcome.y, .outcome.a { color: var(--ok); } .outcome.n, .outcome.timeout { color: var(--bad); }
+
+.btn { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover:not(:disabled) { background: var(--panel-2); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+.btn.danger { color: var(--bad); }
+kbd { font-family: var(--mono); font-size: 11px; border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; opacity: .7; }
+
+/* composer */
+footer { position: sticky; bottom: 0; background: linear-gradient(to bottom, transparent, var(--bg) 18px); padding-top: 18px; }
+.composer { max-width: 900px; margin: 0 auto; padding: 0 16px 14px; }
+.box { display: flex; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 6px; box-shadow: var(--shadow); }
+.box:focus-within { border-color: var(--accent); }
+.box input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 6px 8px; outline: none; }
+.box input:disabled { color: var(--muted); }
+.examples { display: flex; gap: 6px; overflow-x: auto; padding: 8px 2px 2px; scrollbar-width: thin; }
+.chip { flex: none; border: 1px solid var(--border); background: var(--panel); border-radius: 999px; padding: 3px 10px; cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.chip:hover { color: var(--text); border-color: var(--accent); }
+.spinner { width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner, .conn.off .dot { animation: none; } }
+.toast { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; max-width: calc(100% - 32px); z-index: 5; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 520px) {
+  .bar { padding: 8px 12px; }
+  .ws { flex-basis: 100%; order: 3; }
+  main { padding: 12px 10px 16px; }
+  .composer { padding: 0 10px 10px; }
+  .btn .label-long { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z" fill="currentColor"/></svg>
+      Supersonic
+    </div>
+    <div class="ws mono" id="ws" title="{{WORKSPACE}}"><bdi>{{WORKSPACE}}</bdi></div>
+    <div class="chips">
+      <span class="pill ok" id="sandbox"><span class="dot"></span>Sandbox on · deletion blocked</span>
+      <span class="pill" id="planner" title="Planner">…</span>
+      <span class="pill" id="approvals" title="Approval mode">approvals: ask</span>
+      <span class="pill" id="undo-count" title="Changes that can be undone">0 undoable</span>
+      <span class="pill conn off" id="conn" title="Connection to the local server"><span class="dot"></span><span class="sr">connection: </span><span id="conn-text">connecting</span></span>
+    </div>
+  </div>
+</header>
+
+<main id="timeline" aria-live="polite">
+  <div class="empty" id="empty">
+    <h1>What should we build?</h1>
+    <p>Type an instruction below. Reads run immediately; writes, edits and shell commands ask first.</p>
+    <p>Every file change can be undone — nothing is ever deleted.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="composer">
+    <form class="box" id="form" autocomplete="off">
+      <label for="input" class="sr">Instruction</label>
+      <input id="input" placeholder="e.g. create hello.py with print('hi') then run python3 hello.py" spellcheck="false">
+      <button class="btn primary" id="run" type="submit"><span class="spinner" id="spin" hidden></span><span id="run-label">Run</span></button>
+      <button class="btn" id="undo" type="button" title="Undo the last file change (moved to .sonic/trash)">↶ <span class="label-long">Undo</span></button>
+    </form>
+    <div class="examples" id="examples" role="group" aria-label="Example instructions"></div>
+  </div>
+</footer>
+
+<script>
+"use strict";
+const TOKEN = document.querySelector('meta[name="sonic-token"]').content;
+const EXAMPLES = [
+  "create hello.py with print('hi') then run python3 hello.py",
+  "list",
+  "replace hi with hello in hello.py then read hello.py",
+  "create notes.md with # Notes\\n- ship it",
+  "run ls -la",
+];
+const $ = (id) => document.getElementById(id);
+const timeline = $("timeline"), input = $("input"), runBtn = $("run"), undoBtn = $("undo");
+const approvals = new Map();   // id -> {card, buttons, outcome}
+let after = 0, busy = false, currentRun = null, toastTimer = null;
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (method === "POST") {
+    opts.headers["X-Sonic-Token"] = TOKEN;
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body || {});
+  }
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* not json */ }
+  return { status: res.status, data };
+}
+
+function toast(msg) {
+  let t = document.querySelector(".toast");
+  if (!t) { t = el("div", "toast"); t.setAttribute("role", "status"); document.body.appendChild(t); }
+  t.textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.remove(), 3500);
+}
+
+function scrollToEnd() {
+  const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 200;
+  if (nearBottom) requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight }));
+}
+
+function setBusy(value) {
+  busy = value;
+  input.disabled = value;
+  runBtn.disabled = value;
+  undoBtn.disabled = value;
+  $("spin").hidden = !value;
+  $("run-label").textContent = value ? "Running" : "Run";
+  if (!value && !approvals.size) input.focus();
+}
+
+async function refreshState() {
+  try {
+    const { data } = await api("GET", "/api/state");
+    if (!data) return;
+    const sb = $("sandbox");
+    sb.className = "pill " + (data.sandbox ? "ok" : "bad");
+    sb.lastChild.textContent = data.sandbox ? "Sandbox on · deletion blocked" : "Sandbox OFF";
+    $("planner").textContent = data.planner;
+    const ws = $("ws");
+    ws.title = data.workspace;
+    ws.firstChild.textContent = data.workspace;
+    const ap = $("approvals");
+    ap.textContent = data.auto_approve ? "approvals: auto" : "approvals: ask";
+    ap.className = "pill" + (data.auto_approve ? " warn" : "");
+    $("undo-count").textContent = `${data.undo_count} undoable`;
+    if (data.busy !== busy) setBusy(data.busy);
+  } catch (_) { /* poll loop reports connection state */ }
+}
+
+/* ---------- rendering ---------- */
+
+function summarize(tool, args) {
+  args = args || {};
+  if (tool === "run_shell") return "$ " + (args.command || "");
+  if (tool === "write_file") return `${args.path} (${new Blob([String(args.content ?? "")]).size} bytes)`;
+  if (tool === "edit_file") return `${args.path}`;
+  if ("path" in args) return String(args.path);
+  return JSON.stringify(args);
+}
+
+function newRun(text) {
+  $("empty")?.remove();
+  const run = el("section", "run");
+  const head = el("div", "run-head");
+  head.append(el("span", "caret", "›"), el("div", "text", text));
+  const status = el("span", "status");
+  status.append(el("span", "spinner"), el("span", "", "working"));
+  head.append(status);
+  const body = el("div", "run-body");
+  run.append(head, body);
+  run._status = status;
+  run._body = body;
+  timeline.appendChild(run);
+  currentRun = run;
+  return run;
+}
+
+function runBody() { return (currentRun || newRun("(earlier run)"))._body; }
+
+function addStep(e) {
+  const d = el("details", "step " + (e.ok ? "ok" : "bad"));
+  const s = el("summary");
+  const first = (e.observation || "").split("\n")[0];
+  const sum = el("span", "sum");
+  sum.append(el("span", "", summarize(e.tool, e.args)));
+  if (first) sum.append(el("span", "first", "  →  " + first));
+  s.append(el("span", "mark", e.ok ? "✓" : "✗"), el("span", "tool", e.tool), sum, el("span", "chev", "▶"));
+  s.setAttribute("aria-label", `${e.ok ? "succeeded" : "failed"}: ${e.tool} ${summarize(e.tool, e.args)}`);
+  d.append(s, el("pre", "obs", e.observation || "(no output)"));
+  if (!e.ok && e.tool === "run_shell") d.open = true;
+  runBody().appendChild(d);
+}
+
+function renderDiff(text) {
+  const pre = el("pre", "diff");
+  pre.setAttribute("aria-label", "proposed changes");
+  for (const line of text.split("\n")) {
+    let cls = "";
+    if (line.startsWith("+++") || line.startsWith("---")) cls = "meta";
+    else if (line.startsWith("@@")) cls = "hunk";
+    else if (line.startsWith("+")) cls = "add";
+    else if (line.startsWith("-")) cls = "del";
+    pre.appendChild(el("span", cls, line));
+  }
+  return pre;
+}
+
+const OUTCOME = { y: "✓ Allowed", n: "✗ Denied", a: "✓ Always allowed", timeout: "✗ Timed out (denied)" };
+
+function addApproval(e) {
+  const card = el("div", "approval");
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", "Approval needed for " + e.tool);
+  const ttl = el("div", "ttl");
+  ttl.append(el("span", "", "Approval needed"), el("span", "tool", e.tool));
+  card.append(ttl);
+  const args = e.args || {};
+  if (e.tool === "run_shell") {
+    card.append(el("pre", "cmd", args.command ?? e.preview));
+  } else {
+    card.append(el("div", "preview mono", e.preview));
+    if (e.diff) card.append(renderDiff(e.diff));
+    else if (e.tool === "write_file" || e.tool === "edit_file") card.append(el("div", "preview", "(no textual changes)"));
+  }
+  const actions = el("div", "actions");
+  const mk = (label, key, cls, decision) => {
+    const b = el("button", "btn " + cls);
+    b.type = "button";
+    b.append(label);
+    if (key) { b.append(" "); b.append(el("kbd", "", key)); }
+    b.addEventListener("click", () => decide(e.id, decision));
+    return b;
+  };
+  const allow = mk("Allow", "Enter", "primary", "y");
+  const deny = mk("Deny", "Esc", "danger", "n");
+  const always = mk("Always allow", "", "", "a");
+  always.title = "Approve every action for the rest of this session";
+  const outcome = el("span", "outcome");
+  actions.append(allow, deny, always, outcome);
+  card.append(actions);
+  runBody().appendChild(card);
+  approvals.set(e.id, { card, buttons: [allow, deny, always], outcome });
+  if (currentRun) currentRun._status.lastChild.textContent = "waiting for you";
+  allow.focus({ preventScroll: true });
+  card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function resolveApproval(id, decision) {
+  const a = approvals.get(id);
+  if (!a) return;
+  approvals.delete(id);
+  a.buttons.forEach((b) => (b.disabled = true));
+  a.card.classList.add("done");
+  a.outcome.className = "outcome " + decision;
+  a.outcome.textContent = OUTCOME[decision] || decision;
+  if (currentRun) currentRun._status.lastChild.textContent = "working";
+}
+
+async function decide(id, decision) {
+  const a = approvals.get(id);
+  if (!a) return;
+  a.buttons.forEach((b) => (b.disabled = true));
+  try {
+    const { status } = await api("POST", "/api/approve", { id, decision });
+    if (status === 200) { resolveApproval(id, decision); refreshState(); }
+    else if (status === 404) resolveApproval(id, "timeout");
+    else { a.buttons.forEach((b) => (b.disabled = false)); toast(`approve failed (${status})`); }
+  } catch (_) {
+    a.buttons.forEach((b) => (b.disabled = false));
+    toast("server unreachable");
+  }
+}
+
+function addFinal(message) {
+  const body = runBody();
+  body.appendChild(el("div", "final" + (/^error:/.test(message) ? " err" : ""), message));
+  if (currentRun) currentRun._status.replaceChildren(el("span", "", "done"));
+  for (const id of [...approvals.keys()]) resolveApproval(id, "timeout");
+  currentRun = null;
+}
+
+function addNote(message) {
+  $("empty")?.remove();
+  timeline.appendChild(el("div", "note sys", "↶ " + message));
+}
+
+function handle(e) {
+  switch (e.type) {
+    case "instruction": newRun(e.text); setBusy(true); break;
+    case "approval_request": addApproval(e); break;
+    case "approval_resolved": resolveApproval(e.id, e.decision); break;
+    case "step": addStep(e); refreshState(); break;
+    case "final": addFinal(e.message); setBusy(false); refreshState(); break;
+    case "undo": addNote(e.message); refreshState(); break;
+  }
+}
+
+/* ---------- polling (server long-polls up to ~1s) ---------- */
+
+function setConn(ok) {
+  $("conn").classList.toggle("off", !ok);
+  $("conn").classList.toggle("ok", ok);
+  $("conn-text").textContent = ok ? "live" : "reconnecting";
+}
+
+async function poll() {
+  for (;;) {
+    try {
+      const { status, data } = await api("GET", `/api/events?after=${after}`);
+      if (status !== 200 || !data) throw new Error(String(status));
+      setConn(true);
+      for (const e of data.events) { handle(e); }
+      if (data.events.length) scrollToEnd();
+      after = data.next;
+      await new Promise((r) => setTimeout(r, data.events.length ? 50 : 300));
+    } catch (_) {
+      setConn(false);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
+/* ---------- input ---------- */
+
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const instruction = input.value.trim();
+  if (!instruction || busy) return;
+  setBusy(true);
+  try {
+    const { status, data } = await api("POST", "/api/run", { instruction });
+    if (status === 202) { input.value = ""; return; }
+    toast(status === 409 ? "Still running the previous instruction" : (data && data.error) || `run failed (${status})`);
+  } catch (_) { toast("server unreachable"); }
+  refreshState().then(() => { if (!busy) setBusy(false); });
+});
+
+undoBtn.addEventListener("click", async () => {
+  try {
+    const { status, data } = await api("POST", "/api/undo");
+    if (status === 409) toast("Wait for the current run to finish");
+    else if (status !== 200) toast(`undo failed (${status})`);
+    else if (data && data.message === "nothing to undo") toast("Nothing to undo");
+  } catch (_) { toast("server unreachable"); }
+});
+
+for (const ex of EXAMPLES) {
+  const chip = el("button", "chip", ex);
+  chip.type = "button";
+  chip.addEventListener("click", () => { input.value = ex; input.focus(); });
+  $("examples").appendChild(chip);
+}
+
+document.addEventListener("keydown", (ev) => {
+  if (!approvals.size || ev.defaultPrevented || ev.isComposing) return;
+  const tag = ev.target.tagName;
+  if (ev.key === "Escape") { ev.preventDefault(); decide([...approvals.keys()].pop(), "n"); }
+  else if (ev.key === "Enter" && tag !== "BUTTON" && tag !== "SUMMARY" && tag !== "INPUT") {
+    ev.preventDefault(); decide([...approvals.keys()].pop(), "y");
+  }
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "/" && document.activeElement !== input && !input.disabled) { ev.preventDefault(); input.focus(); }
+});
+
+refreshState();
+poll();
+input.focus();
+</script>
+</body>
+</html>
