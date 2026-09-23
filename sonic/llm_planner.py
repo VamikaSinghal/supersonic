@@ -132,18 +132,21 @@ def _http_client(api_key: str) -> Callable[[dict], dict]:
 
 
 class LLMPlanner:
-    def __init__(self, client: Callable[[dict], dict], model: str = DEFAULT_MODEL, max_tokens: int = 16000):
+    def __init__(self, client: Callable[[dict], dict], model: str = DEFAULT_MODEL, max_tokens: int = 16000,
+                 context: Callable[[str], str] | None = None):
+        """context: optional query -> text lookup (e.g. ContextGraph.render_context), added to the system prompt."""
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
+        self.context = context
 
     @classmethod
-    def from_env(cls) -> "LLMPlanner":
+    def from_env(cls, context: Callable[[str], str] | None = None) -> "LLMPlanner":
         """Real client via urllib. RuntimeError mentioning ANTHROPIC_API_KEY if it is unset."""
         key = os.environ.get("ANTHROPIC_API_KEY")
         if not key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set; export it to use the LLM planner")
-        return cls(_http_client(key), model=os.environ.get("SONIC_MODEL") or DEFAULT_MODEL)
+        return cls(_http_client(key), model=os.environ.get("SONIC_MODEL") or DEFAULT_MODEL, context=context)
 
     def build_request(self, instruction: str, history: list[Step]) -> dict:
         """Messages API body: model, max_tokens, system, tools, messages.
@@ -162,10 +165,14 @@ class LLMPlanner:
                 {"type": "tool_result", "tool_use_id": tool_id,
                  "content": step.observation, "is_error": not step.ok},
             ]})
+        system = SYSTEM_PROMPT
+        recalled = self.context(instruction) if self.context else ""
+        if recalled:
+            system += "\n\nRelevant context from the user's second brain (files, notes, past tasks):\n" + recalled
         return {
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "tools": TOOL_SCHEMAS,
             "messages": messages,
         }

@@ -4,6 +4,7 @@ import sys
 from typing import Callable
 
 from sonic.agent import Agent
+from sonic.context import ContextGraph
 from sonic.log import SessionLog
 from sonic.planner import USAGE, Action, Planner, Step, StubPlanner
 from sonic.undo import UndoStack
@@ -16,16 +17,19 @@ SLASH_HELP = (
     "Slash commands:\n"
     "  /undo   revert the last file change (the replaced version goes to .sonic/trash)\n"
     "  /log    show recent steps from this session's log\n"
+    "  /remember <fact>   save a note to your second brain (#tags and file names get linked)\n"
+    "  /context <query>   show what the harness recalls for a query\n"
+    "  /brain  summary of your context graph\n"
     "  /help   show this help\n"
     "  /quit   exit (also /exit, Ctrl-D)"
 )
 
 
-def make_planner(kind: str = "stub") -> Planner:
+def make_planner(kind: str = "stub", context: ContextGraph | None = None) -> Planner:
     """Single place to construct the planner."""
     if kind == "llm":
         from sonic.llm_planner import LLMPlanner
-        return LLMPlanner.from_env()
+        return LLMPlanner.from_env(context=context.render_context if context else None)
     return StubPlanner()
 
 
@@ -82,9 +86,30 @@ def banner(ws: Workspace, yolo: bool, planner: str) -> str:
     return f"sonic · workspace {ws.root} · sandbox: {sandbox} · approvals: {approvals} · planner: {planner}"
 
 
-def handle_slash(line: str, undo: UndoStack, log: SessionLog) -> bool:
+def brain_summary(graph: ContextGraph) -> str:
+    """Node counts by type and the most connected nodes."""
+    data = graph.to_json()
+    nodes = [n for n in data["nodes"] if not n.get("archived")]
+    if not nodes:
+        return "your second brain is empty: run something or /remember a fact"
+    counts: dict[str, int] = {}
+    for n in nodes:
+        counts[n["type"]] = counts.get(n["type"], 0) + 1
+    degree: dict[str, int] = {}
+    for e in data["edges"]:
+        for end in (e["src"], e["dst"]):
+            degree[end] = degree.get(end, 0) + 1
+    hubs = sorted(degree, key=lambda i: (-degree[i], i))[:5]
+    parts = ", ".join(f"{v} {k}{'s' if v != 1 else ''}" for k, v in sorted(counts.items()))
+    lines = [f"{len(nodes)} nodes ({parts}), {len(data['edges'])} links"]
+    lines += [f"  hub: {h} ({degree[h]} links)" for h in hubs]
+    return "\n".join(lines)
+
+
+def handle_slash(line: str, undo: UndoStack, log: SessionLog, graph: ContextGraph) -> bool:
     """Handle a slash command; return False when the REPL should exit."""
-    cmd = line.split()[0].lower()
+    cmd, _, rest = line.partition(" ")
+    cmd, rest = cmd.lower(), rest.strip()
     if cmd in ("/quit", "/exit"):
         return False
     if cmd == "/undo":
@@ -92,6 +117,18 @@ def handle_slash(line: str, undo: UndoStack, log: SessionLog) -> bool:
     elif cmd == "/log":
         print(log.recent())
         print(f"(full log: {log.path})")
+    elif cmd == "/remember":
+        if not rest:
+            print("usage: /remember <fact>")
+        else:
+            node = graph.remember(rest)
+            graph.save()
+            linked = [n["id"] for n in graph.neighbors(node)]
+            print(f"remembered {node}" + (f" → linked {', '.join(linked)}" if linked else ""))
+    elif cmd == "/context":
+        print(graph.render_context(rest or "") or "(nothing relevant yet)")
+    elif cmd == "/brain":
+        print(brain_summary(graph))
     elif cmd == "/help":
         print(USAGE)
         print(SLASH_HELP)
@@ -113,8 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     ws = Workspace(args.root, sandboxed=not args.no_sandbox)
+    graph = ContextGraph(ws)
     try:
-        planner = make_planner(args.planner)
+        planner = make_planner(args.planner, graph)
     except RuntimeError as e:
         print(f"sonic: {e}", file=sys.stderr)
         return 2
@@ -137,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         log.step(step)
 
     agent = Agent(ws, planner, max_steps=args.max_steps,
-                  approve=make_approver(args.yolo), on_step=on_step, undo=undo)
+                  approve=make_approver(args.yolo), on_step=on_step, undo=undo, context=graph)
     print(banner(ws, args.yolo, args.planner))
     print("Type an instruction, /help, or /quit.")
 
@@ -150,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         if not line:
             continue
         if line.startswith("/"):
-            if not handle_slash(line, undo, log):
+            if not handle_slash(line, undo, log, graph):
                 return 0
             continue
         log.instruction(line)
