@@ -227,7 +227,11 @@ def test_stub_quoted_then_stays_literal():
     "replace a with " + "in " * 30_000 + "'",
     "write " + "with to " * 12_000,
     '"' * 100_000,
-], ids=lambda s: repr(s[:24]))
+    "create " + " " * 100_000 + "x",
+    "replace a" + " " * 100_000 + "with b",
+    "read a" + " " * 100_000 + "then x",
+    "write x" + " " * 100_000 + "to",
+],ids=lambda s: repr(s[:24]))
 def test_stub_very_long_instruction_parses_fast(instruction):
     t = time.perf_counter()
     StubPlanner().next_action(instruction, [])

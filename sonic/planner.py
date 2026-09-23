@@ -69,7 +69,7 @@ USAGE = (
 HELP = "Sorry, I didn't understand. " + USAGE
 
 _VERBS = r"read|show|cat|open|list|ls|create|write|replace|run|exec|execute"
-_THEN = re.compile(r"\s+(?:and\s+)?then\s+(?=(?:" + _VERBS + r")\b)", re.IGNORECASE)
+_THEN = re.compile(r"\s++(?:and\s++)?then\s++(?=(?:" + _VERBS + r")\b)", re.IGNORECASE)
 _QUOTED = r"'[^']+'|\"[^\"]+\""
 _ANY_PATH = r"(?P<path>.+)"
 _PATH = r"(?P<path>" + _QUOTED + r"|[^'\"]+)"
@@ -88,7 +88,8 @@ def _split(instruction: str) -> list[str]:
             quote = "" if c == quote else quote
         elif c in "'\"" and not (i and instruction[i - 1].isalnum()):
             quote = c
-        elif m := _THEN.match(instruction, i):
+        elif i and not instruction[i - 1].isspace() and (m := _THEN.match(instruction, i)):
+            # only try at the start of a whitespace run: keeps long runs linear
             clauses.append(instruction[start:i])
             start = i = m.end()
             continue
@@ -114,27 +115,81 @@ def _rule(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE | re.DOTALL)
 
 
-_RULES: list[tuple[re.Pattern[str], Callable[[re.Match[str]], Action]]] = [
+_REPLACE_HEAD = _rule(r"replace\s+")
+_WITH = _rule(r"(?<=\S)\s++with\s++")
+_IN_WORD = _rule(r"(?<=\s)in(?=\s)")
+_IN_TAIL = _rule(r".+(?<=\S)\s++in\s++")
+_PATH_RE = _rule(_PATH)
+
+
+class _ReplaceMatcher:
+    r"""Linear-time stand-in for the regex
+    r"replace\s+(?P<old>.+?)\s+with\s+(?P<new>.+)\s+in\s+" + _PATH,
+    which backtracks catastrophically (seconds) on long inputs full of "with"/"in".
+
+    old = text before the first " with "; new/path split at the last " in " when that
+    leaves a quote-free path, otherwise at the " in " before a fully quoted final path.
+    """
+
+    def fullmatch(self, clause: str) -> dict[str, str] | None:
+        head = _REPLACE_HEAD.match(clause)
+        if not head:
+            return None
+        body = clause[head.end():]
+        w = _WITH.search(body, 1)  # old must be non-empty
+        if not w:
+            return None
+        old, rest = body[:w.start()], body[w.end():]
+        last = None
+        for last in _IN_WORD.finditer(rest):
+            pass
+        if last is not None:
+            new, path = rest[:last.start()], rest[last.end():].lstrip()
+            if new.strip() and path and _PATH_RE.fullmatch(path):
+                return {"old": old, "new": new, "path": path}
+        if rest and rest[-1] in "'\"":
+            start = rest.rfind(rest[-1], 0, len(rest) - 1)
+            if start >= 0 and _IN_TAIL.fullmatch(rest, 0, start) and _PATH_RE.fullmatch(rest, start):
+                new = rest[:start].rstrip()[:-2]  # drop the trailing "in"
+                return {"old": old, "new": new, "path": rest[start:]}
+        return None
+
+
+_replace = _ReplaceMatcher()
+
+# Separators use possessive \s++ and a (?<=\S) guard so long whitespace runs cannot
+# trigger quadratic/cubic backtracking.
+_RULES: list[tuple[re.Pattern[str] | _ReplaceMatcher, Callable[..., Action]]] = [
     (_rule(r"(?:read|show|cat|open)\s+" + _ANY_PATH),
      lambda m: Action("read_file", {"path": _unquote(m["path"])})),
     (_rule(r"(?:list|ls)(?:\s+" + _ANY_PATH + ")?"),
      lambda m: Action("list_dir", {"path": _unquote(m["path"] or ".")})),
-    (_rule(r"replace\s+(?P<old>.+?)\s+with\s+(?P<new>.+)\s+in\s+" + _PATH),
-     lambda m: Action("edit_file", {"path": _unquote(m["path"]),
-                                    "old": _text(m["old"]), "new": _text(m["new"])})),
-    (_rule(r"(?:create|write)\s+" + _LAZY_PATH + r"\s+with\s+(?P<content>.*)"),
+    (_replace, lambda m: Action("edit_file", {"path": _unquote(m["path"]),
+                                              "old": _text(m["old"]), "new": _text(m["new"])})),
+    (_rule(r"(?:create|write)\s++" + _LAZY_PATH + r"(?<=\S)\s++with\s++(?P<content>.*)"),
      lambda m: Action("write_file", {"path": _unquote(m["path"]), "content": _text(m["content"])})),
-    (_rule(r"write\s+(?P<content>.*)\s+to\s+" + _PATH),
+    (_rule(r"write\s++(?P<content>.*)(?<=\S)\s++to\s++" + _PATH),
      lambda m: Action("write_file", {"path": _unquote(m["path"]), "content": _text(m["content"])})),
+    (_rule(r"create\s++" + _PATH + r"(?<=\S)\s++with"),  # "create x.txt with" -> empty file
+     lambda m: Action("write_file", {"path": _unquote(m["path"]), "content": ""})),
     (_rule(r"(?:run|exec|execute)\s+(?P<command>.+)"),
      lambda m: Action("run_shell", {"command": m["command"].strip()})),
 ]
 
 
+_DANGLING_THEN = re.compile(r"^(?:and\s++)?then(?:\s++|$)|(?<=\S)\s++(?:and\s++)?then$", re.IGNORECASE)
+
+
 def _parse(instruction: str) -> list[Action] | None:
-    """Turn an instruction into actions; None if any clause is unrecognised."""
+    """Turn an instruction into actions; None if any clause is unrecognised.
+
+    A dangling leading "then " or trailing " then" / " and then" is ignored.
+    """
     actions = []
-    for clause in _split(instruction.strip()):
+    instruction = _DANGLING_THEN.sub("", instruction.strip()).strip()
+    if not instruction:
+        return None
+    for clause in _split(instruction):
         for pattern, build in _RULES:
             if m := pattern.fullmatch(clause.strip()):
                 actions.append(build(m))
