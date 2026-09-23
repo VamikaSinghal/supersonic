@@ -22,15 +22,24 @@ Reads (read_file, list_dir) never need approval. Uses Agent with UndoStack and S
 Additive extras: /api/state also has "auto_approve"; events "approval_resolved" {"id", "decision"}
 and "undo" {"message"} let every open tab (and a reload) replay the same timeline.
 /api/undo answers 409 while a run is in progress.
+
+Brain (the context graph, sonic/context.py; one shared instance, guarded by a lock):
+  GET  /api/graph             -> graph.to_json(): {"nodes": [...], "edges": [...]}
+  GET  /api/context?q=...     -> {"text": render_context(q), "nodes": relevant(q)}
+  POST /api/remember {"text"} -> {"id", "linked": [neighbour ids]}   (saved)
+  POST /api/forget   {"id"}   -> {"ok": true}; 404 if unknown          (archived, never erased; saved)
+Each remember/forget also emits {"type": "graph_changed"}. If the graph can't load, these answer 503.
 """
 import difflib
 import hmac
 import html
 import json
 import secrets
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from sonic.agent import Agent
@@ -95,6 +104,40 @@ def _planner_name(planner: Planner) -> str:
     return f"{name} · {model}" if isinstance(model, str) else name
 
 
+class LockedGraph:
+    """Thread-safe facade: every ContextGraph method call holds one shared lock."""
+
+    def __init__(self, graph: ContextGraph):
+        self._graph = graph
+        self.lock = threading.RLock()
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._graph, name)
+        if not callable(attr):
+            return attr
+
+        def locked(*args, **kwargs):
+            with self.lock:
+                return attr(*args, **kwargs)
+        return locked
+
+
+def _open_graph(ws: Workspace, planner: Planner, graph: ContextGraph | None) -> LockedGraph | None:
+    """Reuse `graph` or the one the planner already recalls from, else load one; None if it can't load.
+    A planner recalling from the graph is rebound to the locked facade."""
+    recall = getattr(planner, "context", None)
+    if graph is None and isinstance(getattr(recall, "__self__", None), ContextGraph):
+        graph = recall.__self__
+    try:
+        locked = LockedGraph(graph if graph is not None else ContextGraph(ws))
+    except Exception as e:
+        print(f"warning: context graph unavailable: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+    if recall is not None and getattr(recall, "__self__", None) is locked._graph:
+        planner.context = locked.render_context
+    return locked
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     app: "WebApp"
@@ -104,16 +147,16 @@ class WebApp:
     token: str
     url: str   # e.g. "http://127.0.0.1:54321/"
 
-    def __init__(self, ws: Workspace, planner: Planner, port: int, yolo: bool, max_steps: int):
+    def __init__(self, ws: Workspace, planner: Planner, port: int, yolo: bool, max_steps: int,
+                 context: ContextGraph | None = None):
         self.ws = ws
         self.planner_name = _planner_name(planner)
         self.token = secrets.token_urlsafe(32)
         self.undo = UndoStack(ws)
         self.log = SessionLog(ws)
-        self.graph = ContextGraph(ws)
-        self.graph_lock = threading.Lock()
+        self.graph = _open_graph(ws, planner, context)
         self.agent = Agent(ws, planner, max_steps=max_steps, approve=self._approve,
-                           on_step=self._on_step, undo=self.undo, context=self.graph)
+                           on_step=self._on_step, undo=self.undo, context=self.graph)  # type: ignore[arg-type]
         self._always = yolo
         self._busy = False
         self._closed = False
@@ -160,7 +203,7 @@ class WebApp:
             busy = self._busy
         return {"workspace": str(self.ws.root), "sandbox": self.ws.sandboxed, "busy": busy,
                 "undo_count": len(self.undo), "planner": self.planner_name,
-                "auto_approve": self._always}
+                "auto_approve": self._always, "brain": self.graph is not None}
 
     # --- runs ---
 
@@ -233,6 +276,37 @@ class WebApp:
             self._emit_locked("undo", message=message)
         return message
 
+    # --- brain ---
+
+    def graph_json(self) -> dict:
+        assert self.graph is not None
+        return self.graph.to_json()
+
+    def context_for(self, query: str) -> dict:
+        assert self.graph is not None
+        if not query.strip():
+            return {"text": "", "nodes": []}
+        with self.graph.lock:
+            return {"text": self.graph.render_context(query), "nodes": self.graph.relevant(query)}
+
+    def remember(self, text: str) -> dict:
+        assert self.graph is not None
+        with self.graph.lock:
+            id_ = self.graph.remember(text)
+            linked = [n["id"] for n in self.graph.neighbors(id_)]
+            self.graph.save()
+        self._emit("graph_changed")
+        return {"id": id_, "linked": linked}
+
+    def forget(self, id_: str) -> bool:
+        assert self.graph is not None
+        with self.graph.lock:
+            if not self.graph.forget(id_):
+                return False
+            self.graph.save()
+        self._emit("graph_changed")
+        return True
+
     def page(self) -> bytes:
         text = PAGE.read_text(encoding="utf-8")
         text = text.replace("{{TOKEN}}", html.escape(self.token))
@@ -278,13 +352,6 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path in ("/", "/index.html"):
             self._send(200, app.page(), "text/html; charset=utf-8")
-        elif url.path == "/api/graph":
-            with app.graph_lock:
-                self._json(200, app.graph.to_json())
-        elif url.path == "/api/context":
-            q = parse_qs(url.query).get("q", [""])[0]
-            with app.graph_lock:
-                self._json(200, {"text": app.graph.render_context(q), "nodes": app.graph.relevant(q)})
         elif url.path == "/api/state":
             self._json(200, app.state())
         elif url.path == "/api/events":
@@ -294,6 +361,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "bad 'after'"})
             events, next_ = app.events_after(after)
             self._json(200, {"events": events, "next": next_})
+        elif url.path == "/api/graph":
+            if self._brain_ok():
+                self._json(200, app.graph_json())
+        elif url.path == "/api/context":
+            if self._brain_ok():
+                self._json(200, app.context_for(parse_qs(url.query).get("q", [""])[0]))
         else:
             self._json(404, {"error": "not found"})
 
@@ -321,27 +394,34 @@ class _Handler(BaseHTTPRequestHandler):
             if not app.answer(id_, decision):
                 return self._json(404, {"error": "no such pending approval"})
             self._json(200, {"ok": True})
-        elif path == "/api/remember":
-            text = str(body.get("text", "")).strip()
-            if not text:
-                return self._json(400, {"error": "text required"})
-            with app.graph_lock:
-                node = app.graph.remember(text)
-                app.graph.save()
-                linked = [n["id"] for n in app.graph.neighbors(node)]
-            self._json(200, {"id": node, "linked": linked})
-        elif path == "/api/forget":
-            with app.graph_lock:
-                ok = app.graph.forget(str(body.get("id", "")))
-                app.graph.save()
-            self._json(200, {"ok": ok})
         elif path == "/api/undo":
             message = app.do_undo()
             if message is None:
                 return self._json(409, {"error": "a run is in progress"})
             self._json(200, {"message": message})
+        elif path == "/api/remember":
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return self._json(400, {"error": "text required"})
+            if self._brain_ok():
+                self._json(200, app.remember(text.strip()))
+        elif path == "/api/forget":
+            id_ = body.get("id")
+            if not isinstance(id_, str) or not id_:
+                return self._json(400, {"error": "id required"})
+            if not self._brain_ok():
+                return
+            if not app.forget(id_):
+                return self._json(404, {"error": "no such node"})
+            self._json(200, {"ok": True})
         else:
             self._json(404, {"error": "not found"})
+
+    def _brain_ok(self) -> bool:
+        if self.server.app.graph is not None:
+            return True
+        self._json(503, {"error": "context graph unavailable"})
+        return False
 
     def _body(self) -> dict | None:
         """Parse a JSON object body (empty = {}); sends an error and returns None if invalid."""
@@ -364,6 +444,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def create_app(ws: Workspace, planner: Planner, port: int = 0, yolo: bool = False,
-               max_steps: int = 10) -> WebApp:
-    """Bind the server (port 0 = pick a free port) without starting it."""
-    return WebApp(ws, planner, port, yolo, max_steps)
+               max_steps: int = 10, context: ContextGraph | None = None) -> WebApp:
+    """Bind the server (port 0 = pick a free port) without starting it.
+    context: the graph to share; default = the planner's recall graph, else a fresh load of ws's."""
+    return WebApp(ws, planner, port, yolo, max_steps, context)
