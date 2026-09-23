@@ -40,6 +40,10 @@ _WORD = re.compile(r"[a-z0-9_]+")
 _HASHTAG = re.compile(r"(?<![\w#])#([A-Za-z0-9_][\w-]*)")
 _PATHISH = re.compile(r"[\w./-]+")
 _SPREAD = 0.5
+_TYPE_BOOST = {"note": 2.0, "task": 1.0, "topic": 1.0, "file": 0.6, "symbol": 0.6, "command": 0.6}
+_INVERSE = {"read": "read by", "wrote": "written by", "edited": "edited by", "ran": "run by",
+            "uses": "used by", "defines": "defined in", "imports": "imported by",
+            "mentions": "mentioned in", "tagged": "tagged on"}
 _RECENCY_MAX = 0.5
 _RECENCY_DAYS = 7.0
 
@@ -77,6 +81,7 @@ class ContextGraph:
         self._incident: dict[str, set[tuple[str, str, str]]] = {}
         self._index: dict[str, set[str]] = {}
         self._node_terms: dict[str, dict[str, int]] = {}
+        self._pending: dict[str, set[str]] = {}
         self._load()
 
     # --- persistence ---
@@ -105,6 +110,9 @@ class ContextGraph:
             n.setdefault("archived", False)
             self._nodes[n["id"]] = n
             self._reindex(n["id"])
+            for group in n["data"].get("pending_imports", []):
+                for c in group:
+                    self._pending.setdefault(c, set()).add(n["id"])
         for e in edges:
             src, dst, rel = e.get("src"), e.get("dst"), e.get("rel")
             if src in self._nodes and dst in self._nodes and rel:
@@ -133,6 +141,8 @@ class ContextGraph:
             self._index.get(t, set()).discard(id)
         weights: dict[str, int] = {}
         for field, w in _FIELD_WEIGHTS:
+            if field == "key" and n.get("key") == n.get("label"):
+                continue
             value = n.get(field) or ""
             text = " ".join(value) if isinstance(value, list) else str(value)
             for t in _terms(text):
@@ -164,6 +174,8 @@ class ContextGraph:
                 n["tags"].append(t)
         n["data"].update(data)
         self._reindex(id)
+        if type == "file" and key in self._pending:
+            self._resolve_pending(id, key)
         return id
 
     def add_edge(self, src: str, dst: str, rel: str) -> None:
@@ -200,7 +212,7 @@ class ContextGraph:
     def forget(self, id: str) -> bool:
         """Archive a node (never erased): excluded from relevant(), still in to_json()."""
         n = self._nodes.get(id)
-        if n is None:
+        if n is None or n["archived"]:
             return False
         n["archived"] = True
         n["updated"] = _now()
@@ -290,22 +302,50 @@ class ContextGraph:
                 sid = self.add_node("symbol", f"{rel}::{node.name}", label=node.name,
                                     kind=kind, line=node.lineno)
                 self.add_edge(fid, sid, "defines")
-        for target in self._imports(tree, rel):
-            self.add_edge(fid, self.add_node("file", target), "imports")
+        self._set_pending(fid, [])
+        pending = []
+        for group in self._imports(tree, rel):
+            target = next((c for c in group if (self.ws.root / c).is_file()), None)
+            if target:
+                self.add_edge(fid, self.add_node("file", target), "imports")
+            else:
+                pending.append(group)
+        self._set_pending(fid, pending)
 
-    def _imports(self, tree: ast.Module, rel: str) -> list[str]:
-        """Workspace files that `rel`'s imports resolve to."""
+    def _set_pending(self, fid: str, groups: list[list[str]]) -> None:
+        """Replace a file's unresolved imports (candidate-path groups) and their index entries."""
+        for group in self._nodes[fid]["data"].get("pending_imports", []):
+            for c in group:
+                self._pending.get(c, set()).discard(fid)
+        if groups:
+            self._nodes[fid]["data"]["pending_imports"] = groups
+        else:
+            self._nodes[fid]["data"].pop("pending_imports", None)
+        for group in groups:
+            for c in group:
+                self._pending.setdefault(c, set()).add(fid)
+
+    def _resolve_pending(self, fid: str, rel: str) -> None:
+        """Link files whose imports were waiting on `rel`."""
+        for importer in sorted(self._pending.get(rel, ())):
+            groups = self._nodes[importer]["data"].get("pending_imports", [])
+            self._set_pending(importer, [g for g in groups if rel not in g])
+            self.add_edge(importer, fid, "imports")
+
+    def _imports(self, tree: ast.Module, rel: str) -> list[list[str]]:
+        """Candidate-path groups for `rel`'s imports; any existing member resolves a group."""
         here = Path(rel).parent
-        found: list[str] = []
+        groups: list[list[str]] = []
 
-        def first(bases: list[Path], parts: list[str]) -> str | None:
+        def candidates(bases: list[Path], parts: list[str]) -> list[str]:
+            out: list[str] = []
             for base in bases:
                 stem = base.joinpath(*parts) if parts else base
                 for cand in ([stem.with_suffix(".py")] if parts else []) + [stem / "__init__.py"]:
                     r = cand.as_posix()
-                    if r != rel and r not in found and (self.ws.root / r).is_file():
-                        return r
-            return None
+                    if r != rel and r not in out and self._rel(r) == r:
+                        out.append(r)
+            return out
 
         for node in ast.walk(tree):
             specs: list[tuple[list[Path], list[str]]] = []
@@ -321,16 +361,15 @@ class ContextGraph:
                     bases = [base]
                 else:
                     bases = [Path("."), here]
-                specs.append((bases, mod))
+                if mod or node.level:
+                    specs.append((bases, mod))
                 for alias in node.names:
                     if alias.name != "*":
                         specs.append((bases, mod + [alias.name]))
             for bases, parts in specs:
-                if not parts and not isinstance(node, ast.ImportFrom):
-                    continue
-                if (r := first(bases, parts)) and self._rel(r):
-                    found.append(r)
-        return found
+                if (group := candidates(bases, parts)) and group not in groups:
+                    groups.append(group)
+        return groups
 
     def remember(self, text: str) -> str:
         """Store a user note; link note -mentions-> file for workspace paths in the text
@@ -357,13 +396,16 @@ class ContextGraph:
         base: dict[str, float] = {}
         for t in _terms(query):
             for id in self._index.get(t, ()):
-                if not self._nodes[id]["archived"]:
-                    base[id] = base.get(id, 0.0) + self._node_terms[id][t]
-        scores = dict(base)
+                n = self._nodes[id]
+                if not n["archived"]:
+                    boost = _TYPE_BOOST.get(n["type"], 1.0)
+                    base[id] = base.get(id, 0.0) + self._node_terms[id][t] * boost
+        spread: dict[str, float] = {}
         for id, s in base.items():
             for m in self._adj.get(id, ()):
                 if not self._nodes[m]["archived"]:
-                    scores[m] = scores.get(m, 0.0) + _SPREAD * s
+                    spread[m] = max(spread.get(m, 0.0), _SPREAD * s)
+        scores = {id: base.get(id, 0.0) + spread.get(id, 0.0) for id in base.keys() | spread.keys()}
         now = datetime.now(timezone.utc)
         ranked = []
         for id, s in scores.items():
@@ -379,12 +421,12 @@ class ContextGraph:
         return [dict(self.node(id), score=-neg) for neg, id in ranked[:max(k, 0)]]
 
     def _edge_hint(self, id: str, limit: int = 4) -> str:
-        """Short "(rel: id, ...; rel-by: id)" summary of a node's strongest links."""
+        """Short "(defines id, ...; mentioned in id)" summary of a node's strongest links."""
         links = []
         for src, dst, rel in self._incident.get(id, ()):
             other = dst if src == id else src
             if not self._nodes[other]["archived"]:
-                label = rel if src == id else f"{rel} by"
+                label = rel if src == id else _INVERSE.get(rel, f"{rel} (from)")
                 links.append((-self._edges[(src, dst, rel)]["weight"], label, other))
         links.sort()
         groups: dict[str, list[str]] = {}
@@ -392,7 +434,7 @@ class ContextGraph:
             groups.setdefault(label, []).append(_trim(m, 48))
         if not groups:
             return ""
-        return "  (" + "; ".join(f"{r}: {', '.join(ms)}" for r, ms in groups.items()) + ")"
+        return "  (" + "; ".join(f"{r} {', '.join(ms)}" for r, ms in groups.items()) + ")"
 
     def render_context(self, query: str, budget_chars: int = 2000) -> str:
         """Plain-text block of relevant nodes (and their key edges) for a model prompt, within budget."""
