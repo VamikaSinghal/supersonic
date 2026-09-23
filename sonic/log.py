@@ -51,9 +51,10 @@ class SessionLog:
         self._write("instruction", text=text)
 
     def step(self, step: Step) -> None:
-        args = {k: _truncate(v) if isinstance(v, str) else v for k, v in step.action.args.items()}
+        raw = step.action.args if isinstance(step.action.args, dict) else {}
+        args = {str(k): _truncate(v) if isinstance(v, str) else v for k, v in raw.items()}
         self._write("step", tool=step.action.tool, args=args, ok=step.ok,
-                    observation=_truncate(step.observation))
+                    observation=_truncate(str(step.observation)))
 
     def final(self, message: str) -> None:
         self._write("final", message=message)
@@ -62,7 +63,7 @@ class SessionLog:
         """Human-readable last n step events for /log, e.g. '✓ write_file a.txt' lines; 'no steps yet' if none."""
         steps = []
         try:
-            with self.path.open(encoding="utf-8") as f:
+            with self.path.open(encoding="utf-8", errors="replace") as f:
                 for line in f:
                     try:
                         event = json.loads(line)
@@ -92,15 +93,19 @@ class SessionLog:
 
 
 def _summarize(event: dict) -> str:
-    args = event.get("args") or {}
-    tool = event.get("tool", "?")
+    """One line for a logged step; tolerates hand-edited or foreign records."""
+    args = event.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    tool = event.get("tool") or "?"
     if tool == "run_shell":
         target = f": {args.get('command', '')}"
     elif "path" in args:
         target = f" {args['path']}"
     else:
         target = ""
-    obs = (event.get("observation") or "").strip().splitlines()
+    observation = event.get("observation")
+    obs = (observation if isinstance(observation, str) else "").strip().splitlines()
     first = obs[0] if obs else ""
     line = f"{'✓' if event.get('ok') else '✗'} {tool}{target}"
     if first:

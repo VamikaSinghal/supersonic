@@ -8,6 +8,16 @@ Node: {"id": f"{type}:{key}", "type", "key", "label", "summary", "tags": [..],
   types: task, file, symbol, command, note, topic
 Edge: {"src", "dst", "rel", "weight": int}   (deduped on (src, dst, rel); repeats bump weight)
   rels: read, wrote, edited, ran, uses, defines, imports, mentions, tagged
+
+Persistence is best-effort and never destructive:
+- a graph.json that can't be parsed is renamed to graph.json.corrupt-<stamp> (never
+  overwritten or deleted) and the graph starts empty; loadable-but-damaged nodes/edges
+  are repaired or skipped;
+- a graph.json from a newer VERSION is copied to graph.json.v<N>-<stamp> and loaded
+  as far as possible;
+- save() is atomic (temp file + os.replace) and never raises: on failure it warns once
+  on stderr. Several ContextGraph instances on one workspace do not merge: the last
+  save() wins.
 """
 import ast
 import hashlib
@@ -16,6 +26,8 @@ import math
 import os
 import re
 import shlex
+import shutil
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +38,8 @@ from sonic.workspace import Workspace
 
 GRAPH_PATH = ".sonic/context/graph.json"
 VERSION = 1
+MAX_PARSE_BYTES = 1_000_000   # .py files larger than this are not parsed for symbols
+_MAX_LINK_CANDIDATES = 200    # path-like tokens checked per note
 
 _FS_RELS = {"read_file": "read", "write_file": "wrote", "edit_file": "edited"}
 _FIELD_WEIGHTS = (("label", 3), ("tags", 3), ("key", 2), ("summary", 1))
@@ -36,8 +50,9 @@ _STOPWORDS = frozenset(
     "their there these those about after before being been also just only some such very "
     "your yours here were why is it of to in on at by an or".split()
 )
-_WORD = re.compile(r"[a-z0-9_]+")
-_HASHTAG = re.compile(r"(?<![\w#])#([A-Za-z0-9_][\w-]*)")
+_WORD = re.compile(r"\w+")
+_HASHTAG = re.compile(r"(?<![\w#])#(\w[\w-]*)")
+_QUOTED = re.compile(r"\"([^\"\n]+)\"|'([^'\n]+)'|`([^`\n]+)`")
 _PATHISH = re.compile(r"[\w./-]+")
 _SPREAD = 0.5
 _TYPE_BOOST = {"note": 2.0, "task": 1.0, "topic": 1.0, "file": 0.6, "symbol": 0.6, "command": 0.6}
@@ -53,10 +68,10 @@ def _now() -> str:
 
 
 def _terms(text: str) -> set[str]:
-    """Lowercase words of >= 3 chars, minus stopwords, with a naive plural strip."""
+    """Lowercase words of >= 3 chars (>= 2 if non-ASCII), minus stopwords, naive plural strip."""
     out = set()
     for w in _WORD.findall(text.lower()):
-        if len(w) < 3 or w in _STOPWORDS:
+        if len(w) < (3 if w.isascii() else 2) or w in _STOPWORDS:
             continue
         if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
             w = w[:-1]
@@ -82,6 +97,8 @@ class ContextGraph:
         self._index: dict[str, set[str]] = {}
         self._node_terms: dict[str, dict[str, int]] = {}
         self._pending: dict[str, set[str]] = {}
+        self._save_disabled: str | None = None
+        self._save_warned = False
         self._load()
 
     # --- persistence ---
@@ -90,33 +107,116 @@ class ContextGraph:
         if not self.path.is_file():
             return
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            nodes = [n for n in raw["nodes"] if isinstance(n, dict) and "id" in n]
-            edges = [e for e in raw["edges"] if isinstance(e, dict)]
-            counter = int(raw.get("task_counter", 0))
-        except (OSError, ValueError, KeyError, TypeError):
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            try:
-                os.replace(self.path, self.path.with_name(f"{self.path.name}.corrupt-{stamp}"))
-            except OSError:
-                pass
+            data = self.path.read_bytes()
+        except OSError as e:
+            # Can't read it, so don't overwrite it either.
+            self._save_disabled = f"could not read {self.path}: {e}"
+            self._warn(f"context graph not loaded ({e}); changes this session won't be saved")
             return
-        self.task_counter = counter
-        for n in nodes:
-            n.setdefault("tags", [])
-            n.setdefault("data", {})
-            n.setdefault("summary", "")
-            n.setdefault("hits", 1)
-            n.setdefault("archived", False)
+        try:
+            raw = json.loads(data.decode("utf-8"))
+            if not isinstance(raw, dict) or not isinstance(raw.get("nodes"), list):
+                raise ValueError("expected an object with a 'nodes' list")
+            edges = raw.get("edges", [])
+            if not isinstance(edges, list):
+                raise ValueError("'edges' is not a list")
+        except (ValueError, UnicodeDecodeError) as e:
+            kept = self._backup("corrupt", move=True)
+            where = f"moved to {kept.name}" if kept else "left in place"
+            self._warn(f"context graph {self.path} is unreadable ({e}); {where}, starting empty")
+            if kept is None:
+                self._save_disabled = "the unreadable graph file could not be moved aside"
+            return
+        version = raw.get("version", VERSION)
+        if not isinstance(version, int) or version > VERSION:
+            kept = self._backup(f"v{version}", move=False)
+            self._warn(f"context graph was written by a newer version ({version!r}); loading what "
+                       f"is compatible" + (f", original kept as {kept.name}" if kept else ""))
+            if kept is None:
+                self._save_disabled = "could not back up a newer-version graph"
+        try:
+            self.task_counter = max(int(raw.get("task_counter", 0)), 0)
+        except (TypeError, ValueError):
+            self.task_counter = 0
+        for n in raw["nodes"]:
+            if (n := self._repair_node(n)) is None:
+                continue
             self._nodes[n["id"]] = n
             self._reindex(n["id"])
             for group in n["data"].get("pending_imports", []):
                 for c in group:
                     self._pending.setdefault(c, set()).add(n["id"])
         for e in edges:
+            if not isinstance(e, dict):
+                continue
             src, dst, rel = e.get("src"), e.get("dst"), e.get("rel")
-            if src in self._nodes and dst in self._nodes and rel:
-                self._link(src, dst, rel, int(e.get("weight", 1)))
+            if not all(isinstance(x, str) for x in (src, dst, rel)) or not rel:
+                continue
+            if src in self._nodes and dst in self._nodes and src != dst:
+                try:
+                    weight = max(int(e.get("weight", 1)), 1)
+                except (TypeError, ValueError):
+                    weight = 1
+                self._link(src, dst, rel, weight)
+
+    @staticmethod
+    def _repair_node(n: object) -> dict | None:
+        """Fill in / coerce a loaded node's fields; None if it has no usable id."""
+        if not isinstance(n, dict) or not isinstance(n.get("id"), str) or not n["id"]:
+            return None
+        type_, _, key = n["id"].partition(":")
+        if not isinstance(n.get("type"), str):
+            n["type"] = type_ if key else "note"
+        if not isinstance(n.get("key"), str):
+            n["key"] = key or n["id"]
+        if not isinstance(n.get("label"), str) or not n["label"]:
+            n["label"] = n["key"]
+        if not isinstance(n.get("summary"), str):
+            n["summary"] = ""
+        tags = n.get("tags")
+        n["tags"] = [t for t in tags if isinstance(t, str) and t] if isinstance(tags, list) else []
+        if not isinstance(n.get("data"), dict):
+            n["data"] = {}
+        pending = n["data"].get("pending_imports")
+        if pending is not None:
+            ok = isinstance(pending, list) and all(
+                isinstance(g, list) and all(isinstance(c, str) for c in g) for g in pending)
+            if not ok:
+                n["data"].pop("pending_imports")
+        if not isinstance(n.get("hits"), int) or isinstance(n["hits"], bool):
+            n["hits"] = 1
+        n["archived"] = n.get("archived") is True
+        now = _now()
+        for field in ("created", "updated"):
+            if not isinstance(n.get(field), str):
+                n[field] = now
+        return n
+
+    def _backup(self, tag: str, move: bool) -> Path | None:
+        """Rename (move=True) or copy graph.json to a fresh graph.json.<tag>-<stamp>[-N].
+        Never overwrites an existing file and never deletes anything."""
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = f"{self.path.name}.{re.sub(r'[^A-Za-z0-9_.-]', '_', tag)[:40]}-{stamp}"
+        for i in range(1000):
+            dest = self.path.with_name(base if i == 0 else f"{base}-{i}")
+            try:
+                if move:
+                    if os.path.lexists(dest):
+                        continue
+                    os.rename(self.path, dest)
+                else:
+                    with open(dest, "xb") as f:     # exclusive create: fails if dest exists
+                        f.write(self.path.read_bytes())
+                    shutil.copystat(self.path, dest)
+                return dest
+            except FileExistsError:
+                continue
+            except OSError:
+                return None
+        return None
+
+    def _warn(self, message: str) -> None:
+        print(f"warning: {message}", file=sys.stderr)
 
     def to_json(self) -> dict:
         """{"nodes": [...], "edges": [...]} for the UI."""
@@ -124,14 +224,25 @@ class ContextGraph:
                           for n in self._nodes.values()],
                 "edges": [dict(e) for e in self._edges.values()]}
 
-    def save(self) -> None:
-        """Atomic write (temp file in the same dir + os.replace)."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": VERSION, "task_counter": self.task_counter, **self.to_json()}
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".graph-", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, self.path)
+    def save(self) -> bool:
+        """Atomic write (temp file in the same dir + os.replace); last writer wins.
+        Never raises: on failure warns once on stderr and returns False."""
+        if self._save_disabled:
+            return False
+        try:
+            payload = {"version": VERSION, "task_counter": self.task_counter, **self.to_json()}
+            text = json.dumps(payload, ensure_ascii=False, indent=1, default=str)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".graph-", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.path)
+        except (OSError, ValueError, TypeError) as e:
+            if not self._save_warned:
+                self._save_warned = True
+                self._warn(f"context graph not saved ({e}); will keep trying silently")
+            return False
+        return True
 
     # --- core graph ---
 
@@ -265,9 +376,12 @@ class ContextGraph:
             task["summary"] = tally
             task["updated"] = _now()
             self._reindex(task_id)
-        tool, args = step.action.tool, step.action.args or {}
+        tool, args = step.action.tool, step.action.args
+        if not isinstance(args, dict):
+            args = {}
         if tool in _FS_RELS and step.ok:
-            rel = self._rel(str(args.get("path", "")))
+            path = args.get("path")
+            rel = self._rel(path) if isinstance(path, str) and path else None
             if rel is None:
                 return
             fid = self.add_node("file", rel)
@@ -292,8 +406,10 @@ class ContextGraph:
     def _index_python(self, rel: str) -> None:
         path = self.ws.root / rel
         try:
+            if path.stat().st_size > MAX_PARSE_BYTES:
+                return
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError, MemoryError):
             return
         fid = f"file:{rel}"
         for node in tree.body:
@@ -373,15 +489,20 @@ class ContextGraph:
 
     def remember(self, text: str) -> str:
         """Store a user note; link note -mentions-> file for workspace paths in the text
-        and note -tagged-> topic for #hashtags. Returns the note id."""
-        text = text.strip()
-        tags = list(dict.fromkeys(t.lower() for t in _HASHTAG.findall(text)))
+        and note -tagged-> topic for #hashtags. Quoted paths may contain spaces.
+        Returns the note id; raises ValueError for empty/blank text."""
+        text = text.strip() if isinstance(text, str) else ""
+        if not text:
+            raise ValueError("nothing to remember: empty note")
+        tags = list(dict.fromkeys(t.rstrip("-").lower() for t in _HASHTAG.findall(text)))
+        tags = [t for t in tags if t]
         key = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
         nid = self.add_node("note", key, label=_trim(text, 60), summary=text, tags=tags)
         self._nodes[nid]["archived"] = False
-        for tok in dict.fromkeys(_PATHISH.findall(text)):
-            if not ("." in tok or "/" in tok or f"file:{tok}" in self._nodes):
-                continue
+        quoted = [next(g for g in m if g) for m in _QUOTED.findall(text)]
+        candidates = [tok for tok in dict.fromkeys(quoted + _PATHISH.findall(text))
+                      if "." in tok or "/" in tok or f"file:{tok}" in self._nodes]
+        for tok in candidates[:_MAX_LINK_CANDIDATES]:
             if rel := self._existing_file(tok):
                 self.add_edge(nid, self.add_node("file", rel), "mentions")
         for tag in tags:
