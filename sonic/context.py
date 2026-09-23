@@ -32,7 +32,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sonic.errors import SandboxError
+from sonic.errors import ToolError
 from sonic.planner import Step
 from sonic.workspace import Workspace
 
@@ -335,7 +335,7 @@ class ContextGraph:
         """Workspace-relative posix path, or None if it escapes or is harness state."""
         try:
             p = self.ws.resolve(path)
-        except (SandboxError, OSError, ValueError):
+        except (ToolError, OSError, ValueError):
             return None
         if p == self.ws.root:
             return None
