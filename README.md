@@ -38,7 +38,7 @@ sonic> run rm hello.py
 | `run <command>` | run_shell (sandboxed) |
 
 Paths may contain spaces; quotes keep a literal ` then ` inside text.
-Slash commands: `/undo`, `/log`, `/help`, `/quit`.
+Slash commands: `/undo`, `/log`, `/remember <fact>`, `/context <query>`, `/brain`, `/help`, `/quit`.
 
 Flags: `--yolo` (skip approvals) · `--no-sandbox` · `--max-steps N` · `--planner stub|llm` · `--web [--port N]`.
 
@@ -57,6 +57,16 @@ Flags: `--yolo` (skip approvals) · `--no-sandbox` · `--max-steps N` · `--plan
 - **`sonic/undo.py`**: undo stack. Undo *moves* the current version to `.sonic/trash/<n>/` and restores the previous one. Nothing is destroyed.
 - **`sonic/log.py`**: one JSONL file per session in `.sonic/sessions/`.
 - **`sonic/web.py` + `sonic/static/index.html`**: the local web UI (timeline, diff-before-approve, undo button). It binds to 127.0.0.1 only, POSTs need a per-session token, and requests with a foreign `Host` header are refused.
+
+## Second brain: the context graph
+
+`sonic/context.py` keeps a local graph at `.sonic/context/graph.json`. Nothing leaves your machine.
+
+- **Captured automatically:** each instruction becomes a task node linked to the files it read, wrote or edited and the commands it ran. Python files are parsed, so functions, classes and imports become nodes and links (import links resolve even when the target is created later).
+- **Your notes:** `/remember auth.py uses JWT #security` stores a note linked to `auth.py` and `#security`.
+- **Recall:** `relevant(query)` ranks your notes first, then connected files, code and recent tasks. The LLM planner gets this in its system prompt, and `/context <query>` shows you exactly what it sees.
+- **Forget** archives a node; it is never erased.
+- **Web:** `GET /api/graph`, `GET /api/context?q=`, `POST /api/remember`, `POST /api/forget`.
 
 ## Safety model: no deletion, anywhere
 

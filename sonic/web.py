@@ -34,6 +34,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from sonic.agent import Agent
+from sonic.context import ContextGraph
 from sonic.errors import ToolError
 from sonic.log import SessionLog
 from sonic.planner import Action, Planner, Step
@@ -109,8 +110,10 @@ class WebApp:
         self.token = secrets.token_urlsafe(32)
         self.undo = UndoStack(ws)
         self.log = SessionLog(ws)
+        self.graph = ContextGraph(ws)
+        self.graph_lock = threading.Lock()
         self.agent = Agent(ws, planner, max_steps=max_steps, approve=self._approve,
-                           on_step=self._on_step, undo=self.undo)
+                           on_step=self._on_step, undo=self.undo, context=self.graph)
         self._always = yolo
         self._busy = False
         self._closed = False
@@ -275,6 +278,13 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path in ("/", "/index.html"):
             self._send(200, app.page(), "text/html; charset=utf-8")
+        elif url.path == "/api/graph":
+            with app.graph_lock:
+                self._json(200, app.graph.to_json())
+        elif url.path == "/api/context":
+            q = parse_qs(url.query).get("q", [""])[0]
+            with app.graph_lock:
+                self._json(200, {"text": app.graph.render_context(q), "nodes": app.graph.relevant(q)})
         elif url.path == "/api/state":
             self._json(200, app.state())
         elif url.path == "/api/events":
@@ -311,6 +321,20 @@ class _Handler(BaseHTTPRequestHandler):
             if not app.answer(id_, decision):
                 return self._json(404, {"error": "no such pending approval"})
             self._json(200, {"ok": True})
+        elif path == "/api/remember":
+            text = str(body.get("text", "")).strip()
+            if not text:
+                return self._json(400, {"error": "text required"})
+            with app.graph_lock:
+                node = app.graph.remember(text)
+                app.graph.save()
+                linked = [n["id"] for n in app.graph.neighbors(node)]
+            self._json(200, {"id": node, "linked": linked})
+        elif path == "/api/forget":
+            with app.graph_lock:
+                ok = app.graph.forget(str(body.get("id", "")))
+                app.graph.save()
+            self._json(200, {"ok": ok})
         elif path == "/api/undo":
             message = app.do_undo()
             if message is None:
