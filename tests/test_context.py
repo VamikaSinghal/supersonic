@@ -86,3 +86,31 @@ def test_render_context_is_readable_and_within_budget(tmp_path):
     assert 0 < len(text) <= 500
     assert "deploy" in text
     assert g.render_context("zzzz nothing matches") == ""
+
+
+# 48
+def test_imports_resolve_when_target_is_created_later(tmp_path):
+    ws = Workspace(tmp_path)
+    g = ContextGraph(ws)
+    t = g.start_task("build")
+    (tmp_path / "auth.py").write_text("import util\n\ndef login():\n    return util.token()\n")
+    g.record_step(t, Step(Action("write_file", {"path": "auth.py", "content": "..."}), True, "wrote"))
+    (tmp_path / "util.py").write_text("def token():\n    return 'jwt'\n")
+    g.record_step(t, Step(Action("write_file", {"path": "util.py", "content": "..."}), True, "wrote"))
+    rels = {(e["src"], e["dst"], e["rel"]) for e in g.to_json()["edges"]}
+    assert ("file:auth.py", "file:util.py", "imports") in rels
+
+
+# 49
+def test_notes_rank_first_and_context_reads_naturally(tmp_path):
+    ws = Workspace(tmp_path)
+    (tmp_path / "auth.py").write_text("def login():\n    pass\n")
+    g = ContextGraph(ws)
+    t = g.start_task("create auth.py")
+    g.record_step(t, Step(Action("write_file", {"path": "auth.py", "content": "..."}), True, "wrote"))
+    note = g.remember("auth.py uses JWT tokens that expire after 1h #security")
+    assert g.relevant("how does login auth work", k=3)[0]["id"] == note
+    text = g.render_context("how does login auth work")
+    assert text.splitlines()[0].startswith("- [note]")
+    assert " by:" not in text
+    assert "defined in" in text or "written by" in text or "mentioned in" in text

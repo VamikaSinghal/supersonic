@@ -102,7 +102,7 @@ def brain_summary(graph: ContextGraph) -> str:
     hubs = sorted(degree, key=lambda i: (-degree[i], i))[:5]
     parts = ", ".join(f"{v} {k}{'s' if v != 1 else ''}" for k, v in sorted(counts.items()))
     lines = [f"{len(nodes)} nodes ({parts}), {len(data['edges'])} links"]
-    lines += [f"  hub: {h} ({degree[h]} links)" for h in hubs]
+    lines += [f"  hub: {h} ({degree[h]} link{"s" if degree[h] != 1 else ""})" for h in hubs]
     return "\n".join(lines)
 
 
