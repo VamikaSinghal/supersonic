@@ -87,7 +87,7 @@ Build the coding harness of your dreams. That's it.
 
 ### Getting Started
 
-### Prerequisites
+#### Prerequisites
 
 The sandbox has the following toolchains pre-installed. Use whichever you prefer:
 
@@ -97,7 +97,7 @@ The sandbox has the following toolchains pre-installed. Use whichever you prefer
 - Java 17 (OpenJDK), with Maven
 - .NET 8
 
-### Setup Instructions
+#### Setup Instructions
 
 Dependencies are installed automatically when you initialize the assessment with the Litmus CLI. Set up whatever project structure and dependencies your harness needs — nothing is pre-scaffolded. You have **75 minutes** of coding time.
 
@@ -114,14 +114,14 @@ There is no required tech stack, framework, or architecture. Build it the way yo
 
 ### Submission Guidelines
 
-### What to Submit
+#### What to Submit
 
 - All source code for your harness.
 - A 5-minute video demo of what you built. 
 
 The video has a single prompt: **"Explain what you made."** There is no questionnaire and no written report — just show and explain your project on screen.
 
-### How to Submit
+#### How to Submit
 
 ```bash
 litmus submit
