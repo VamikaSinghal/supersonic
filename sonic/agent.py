@@ -24,7 +24,10 @@ class Agent:
         max_steps: int = 10,
         approve: Callable[[Action], bool] = lambda action: True,
         on_step: Callable[[Step], None] = lambda step: None,
+        undo: "UndoStack | None" = None,
     ):
+        """undo: if given, write_file/edit_file changes are recorded after they succeed.
+        A run_shell step is ok=False when the command exits non-zero or times out."""
         self.workspace = workspace
         self.planner = planner
         self.max_steps = max_steps

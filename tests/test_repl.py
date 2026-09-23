@@ -33,3 +33,28 @@ def test_repl_always_approves_rest_of_session_and_handles_help(tmp_path):
     assert (tmp_path / "a.txt").exists() and (tmp_path / "b.txt").exists()
     assert out.count("[y/n/a]") == 1           # 'a' = always, so b.txt wasn't prompted
     assert out.lower().count("run <command>") >= 2   # /help and unknown input both show help
+
+
+# 32
+def test_repl_undo_moves_created_file_to_trash(tmp_path):
+    out = sonic(tmp_path, "create a.txt with hi\n/undo\n/undo\n", "--yolo")
+    assert not (tmp_path / "a.txt").exists()
+    assert (tmp_path / ".sonic" / "trash").exists()
+    assert "nothing to undo" in out.lower()
+
+
+# 33
+def test_repl_log_command_and_session_file(tmp_path):
+    out = sonic(tmp_path, "create a.txt with hi\n/log\n", "--yolo")
+    assert "✓ write_file" in out.split("/log")[-1] or out.count("write_file") >= 2
+    logs = list((tmp_path / ".sonic" / "sessions").glob("*.jsonl"))
+    assert len(logs) == 1 and '"instruction"' in logs[0].read_text()
+
+
+# 34
+def test_repl_llm_planner_without_key_explains_and_exits(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    r = subprocess.run([sys.executable, "-m", "sonic", "--root", str(tmp_path), "--planner", "llm"],
+                       input="", capture_output=True, text=True, timeout=20)
+    assert r.returncode != 0
+    assert "ANTHROPIC_API_KEY" in r.stdout + r.stderr

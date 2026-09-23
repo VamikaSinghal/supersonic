@@ -49,3 +49,11 @@ def test_agent_survives_errors_denials_and_caps_steps(tmp_path):
     steps, final = capped.run("loop")
     assert len(steps) == 3 and len(seen) == 3
     assert "max" in final.lower()
+
+
+# 31
+def test_nonzero_shell_exit_is_a_failed_step(tmp_path):
+    agent = Agent(Workspace(tmp_path), StubPlanner())
+    steps, final = agent.run("run exit 2")
+    assert steps[0].ok is False and "exit 2" in steps[0].observation
+    assert "1 failed" in final
