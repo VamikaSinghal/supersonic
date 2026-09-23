@@ -1,6 +1,8 @@
 """Entry point: `python -m sonic [--root DIR] [--yolo] [--no-sandbox] [--max-steps N] [--planner stub|llm] [--web [--port N]]`."""
 import argparse
+import os
 import sys
+from pathlib import Path
 from typing import Callable
 
 from sonic.agent import Agent
@@ -23,6 +25,21 @@ SLASH_HELP = (
     "  /help   show this help\n"
     "  /quit   exit (also /exit, Ctrl-D)"
 )
+
+
+def _int_in(lo: int, hi: int | None = None) -> Callable[[str], int]:
+    """argparse type: an integer in [lo, hi]."""
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"invalid integer: {text!r}") from None
+        if value < lo or (hi is not None and value > hi):
+            bounds = f"between {lo} and {hi}" if hi is not None else f">= {lo}"
+            raise argparse.ArgumentTypeError(f"must be {bounds}, got {value}")
+        return value
+    parse.__name__ = "int"
+    return parse
 
 
 def make_planner(kind: str = "stub", context: ContextGraph | None = None) -> Planner:
@@ -108,8 +125,9 @@ def brain_summary(graph: ContextGraph) -> str:
 
 def handle_slash(line: str, undo: UndoStack, log: SessionLog, graph: ContextGraph) -> bool:
     """Handle a slash command; return False when the REPL should exit."""
-    cmd, _, rest = line.partition(" ")
-    cmd, rest = cmd.lower(), rest.strip()
+    parts = line.split(None, 1)
+    cmd = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
     if cmd in ("/quit", "/exit"):
         return False
     if cmd == "/undo":
@@ -122,7 +140,7 @@ def handle_slash(line: str, undo: UndoStack, log: SessionLog, graph: ContextGrap
             print("usage: /remember <fact>")
         else:
             node = graph.remember(rest)
-            graph.save()
+            graph.save()                 # never raises; warns once if it can't write
             linked = [n["id"] for n in graph.neighbors(node)]
             print(f"remembered {node}" + (f" → linked {', '.join(linked)}" if linked else ""))
     elif cmd == "/context":
@@ -142,14 +160,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=".", help="workspace root (default: cwd)")
     parser.add_argument("--yolo", action="store_true", help="approve every action without asking")
     parser.add_argument("--no-sandbox", action="store_true", help="disable the OS sandbox for shell")
-    parser.add_argument("--max-steps", type=int, default=10, help="max steps per instruction")
+    parser.add_argument("--max-steps", type=_int_in(1), default=10, help="max steps per instruction")
     parser.add_argument("--planner", choices=["stub", "llm"], default="stub",
                         help="stub = rule-based (default); llm = Anthropic API (needs ANTHROPIC_API_KEY)")
     parser.add_argument("--web", action="store_true", help="open the local web UI instead of the REPL")
-    parser.add_argument("--port", type=int, default=8765, help="web UI port (default 8765)")
+    parser.add_argument("--port", type=_int_in(1, 65535), default=8765,
+                        help="web UI port (default 8765)")
     args = parser.parse_args(argv)
 
-    ws = Workspace(args.root, sandboxed=not args.no_sandbox)
+    root = Path(args.root).expanduser()
+    if not root.is_dir():
+        what = "is not a directory" if root.exists() else "does not exist"
+        print(f"sonic: --root {args.root} {what}", file=sys.stderr)
+        return 2
+    ws = Workspace(root, sandboxed=not args.no_sandbox)
     graph = ContextGraph(ws)
     try:
         planner = make_planner(args.planner, graph)
@@ -159,7 +183,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.web:
         from sonic.web import create_app
-        app = create_app(ws, planner, port=args.port, yolo=args.yolo)
+        try:
+            app = create_app(ws, planner, port=args.port, yolo=args.yolo, max_steps=args.max_steps)
+        except OSError as e:
+            reason = "port already in use" if e.errno in (48, 98, 10048) else (e.strerror or str(e))
+            print(f"sonic: cannot start web UI on 127.0.0.1:{args.port}: {reason}", file=sys.stderr)
+            return 2
         print(banner(ws, args.yolo, args.planner))
         print(f"web UI: {app.url}  (Ctrl-C to stop)")
         try:
@@ -197,9 +226,24 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             message = "(cancelled)"
             print()
+        except Exception as e:           # a planner/model failure must not kill the REPL
+            message = f"error: {type(e).__name__}: {e}"
         log.final(message)
         print(message)
 
 
+def _run() -> int:
+    """main(), but a reader closing the pipe early (e.g. `| head -1`) ends quietly."""
+    try:
+        code = main()
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # Point stdout at devnull so the interpreter's final flush doesn't fail again.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run())
