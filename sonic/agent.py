@@ -5,6 +5,7 @@ from typing import Callable
 from sonic.errors import ToolError
 from sonic.planner import Action, Done, Planner, Step
 from sonic.tools import fs, shell
+from sonic.undo import UndoStack
 from sonic.workspace import Workspace
 
 TOOLS: dict[str, Callable] = {
@@ -24,7 +25,7 @@ class Agent:
         max_steps: int = 10,
         approve: Callable[[Action], bool] = lambda action: True,
         on_step: Callable[[Step], None] = lambda step: None,
-        undo: "UndoStack | None" = None,
+        undo: UndoStack | None = None,
     ):
         """undo: if given, write_file/edit_file changes are recorded after they succeed.
         A run_shell step is ok=False when the command exits non-zero or times out."""
@@ -33,6 +34,7 @@ class Agent:
         self.max_steps = max_steps
         self.approve = approve
         self.on_step = on_step
+        self.undo = undo
 
     def run(self, instruction: str) -> tuple[list[Step], str]:
         """Loop until the planner returns Done or max_steps is hit.
@@ -64,9 +66,14 @@ class Agent:
             pass  # signature unavailable; let the call itself decide
         if not self.approve(action):
             return Step(action, False, "denied by user")
+        change = self.undo.snapshot(action) if self.undo is not None else None
         try:
-            return Step(action, True, str(tool(self.workspace, **action.args)))
+            result = tool(self.workspace, **action.args)
         except ToolError as e:
             return Step(action, False, f"error: {e}")
         except Exception as e:
             return Step(action, False, f"error: {type(e).__name__}: {e}")
+        ok = not (isinstance(result, shell.ShellResult) and (result.timed_out or result.exit_code != 0))
+        if ok and change is not None and self.undo is not None:
+            self.undo.push(change)
+        return Step(action, ok, str(result))
