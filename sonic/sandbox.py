@@ -4,6 +4,8 @@ Policy (enforced by the kernel, so obfuscation like eval/base64/python -c can't 
   - No file or directory may be deleted anywhere, including inside the workspace.
     Only ws.scratch (the command's TMPDIR) allows deletion.
   - No file may be written outside the workspace, ws.scratch, or /dev.
+  - Nothing may be written under <workspace>/.sonic (harness internals: context graph,
+    trash, session logs); the harness itself writes there in-process, unsandboxed.
   - Reads and process execution are allowed.
 
 macOS: sandbox-exec with a generated SBPL profile.
@@ -17,6 +19,7 @@ from pathlib import Path
 from sonic.workspace import Workspace
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+INTERNAL_DIR = ".sonic"
 
 
 def available() -> bool:
@@ -24,20 +27,29 @@ def available() -> bool:
     return sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC)
 
 
+def _quote(text: str) -> str:
+    """`text` as an SBPL string literal (backslashes and double quotes escaped)."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _lit(path: Path | str) -> str:
     """`path` resolved and quoted as an SBPL string literal."""
-    real = os.path.realpath(path)
-    return '"' + real.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return _quote(os.path.realpath(path))
 
 
 def profile(ws: Workspace) -> str:
     """The sandbox profile text for this workspace."""
     root, scratch = _lit(ws.root), _lit(ws.scratch)
+    # The internal dir by its own name under the real root (so it can't be created or
+    # replaced) and by its resolved path (in case it is a symlink to somewhere else).
+    internal = {_quote(os.path.join(os.path.realpath(ws.root), INTERNAL_DIR)),
+                _lit(ws.root / INTERNAL_DIR)}
     return "\n".join([
         "(version 1)",
         "(allow default)",
         "(deny file-write*)",
         f"(allow file-write* (subpath {root}) (subpath {scratch}) (subpath \"/dev\"))",
+        "(deny file-write* " + " ".join(f"(subpath {p})" for p in sorted(internal)) + ")",
         "(deny file-write-unlink)",
         f"(allow file-write-unlink (subpath {scratch}))",
     ])
