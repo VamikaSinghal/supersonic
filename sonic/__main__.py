@@ -1,20 +1,31 @@
-"""REPL entry point: `python -m sonic [--root DIR] [--yolo] [--no-sandbox] [--max-steps N]`."""
+"""Entry point: `python -m sonic [--root DIR] [--yolo] [--no-sandbox] [--max-steps N] [--planner stub|llm] [--web [--port N]]`."""
 import argparse
 import sys
 from typing import Callable
 
 from sonic.agent import Agent
+from sonic.log import SessionLog
 from sonic.planner import USAGE, Action, Planner, Step, StubPlanner
+from sonic.undo import UndoStack
 from sonic.workspace import Workspace
 
 PROMPT = "sonic> "
 SAFE_TOOLS = {"read_file", "list_dir"}
 MAX_OBS_LINES = 20
-SLASH_HELP = "Slash commands:\n  /help   show this help\n  /quit   exit (also /exit, Ctrl-D)"
+SLASH_HELP = (
+    "Slash commands:\n"
+    "  /undo   revert the last file change (the replaced version goes to .sonic/trash)\n"
+    "  /log    show recent steps from this session's log\n"
+    "  /help   show this help\n"
+    "  /quit   exit (also /exit, Ctrl-D)"
+)
 
 
-def make_planner() -> Planner:
-    """Single place to construct the planner (swap in an LLM planner here)."""
+def make_planner(kind: str = "stub") -> Planner:
+    """Single place to construct the planner."""
+    if kind == "llm":
+        from sonic.llm_planner import LLMPlanner
+        return LLMPlanner.from_env()
     return StubPlanner()
 
 
@@ -65,18 +76,23 @@ def print_step(step: Step) -> None:
         print(f"    … ({len(rest) - MAX_OBS_LINES} more lines)")
 
 
-def banner(ws: Workspace, yolo: bool) -> str:
+def banner(ws: Workspace, yolo: bool, planner: str) -> str:
     sandbox = "on" if ws.sandboxed else "OFF (--no-sandbox)"
     approvals = "yolo" if yolo else "ask"
-    return f"sonic · workspace {ws.root} · sandbox: {sandbox} · approvals: {approvals}"
+    return f"sonic · workspace {ws.root} · sandbox: {sandbox} · approvals: {approvals} · planner: {planner}"
 
 
-def handle_slash(line: str) -> bool:
+def handle_slash(line: str, undo: UndoStack, log: SessionLog) -> bool:
     """Handle a slash command; return False when the REPL should exit."""
     cmd = line.split()[0].lower()
     if cmd in ("/quit", "/exit"):
         return False
-    if cmd == "/help":
+    if cmd == "/undo":
+        print(undo.undo())
+    elif cmd == "/log":
+        print(log.recent())
+        print(f"(full log: {log.path})")
+    elif cmd == "/help":
         print(USAGE)
         print(SLASH_HELP)
     else:
@@ -90,12 +106,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--yolo", action="store_true", help="approve every action without asking")
     parser.add_argument("--no-sandbox", action="store_true", help="disable the OS sandbox for shell")
     parser.add_argument("--max-steps", type=int, default=10, help="max steps per instruction")
+    parser.add_argument("--planner", choices=["stub", "llm"], default="stub",
+                        help="stub = rule-based (default); llm = Anthropic API (needs ANTHROPIC_API_KEY)")
+    parser.add_argument("--web", action="store_true", help="open the local web UI instead of the REPL")
+    parser.add_argument("--port", type=int, default=8765, help="web UI port (default 8765)")
     args = parser.parse_args(argv)
 
     ws = Workspace(args.root, sandboxed=not args.no_sandbox)
-    agent = Agent(ws, make_planner(), max_steps=args.max_steps,
-                  approve=make_approver(args.yolo), on_step=print_step)
-    print(banner(ws, args.yolo))
+    try:
+        planner = make_planner(args.planner)
+    except RuntimeError as e:
+        print(f"sonic: {e}", file=sys.stderr)
+        return 2
+
+    if args.web:
+        from sonic.web import create_app
+        app = create_app(ws, planner, port=args.port, yolo=args.yolo)
+        print(banner(ws, args.yolo, args.planner))
+        print(f"web UI: {app.url}  (Ctrl-C to stop)")
+        try:
+            app.serve_forever()
+        except KeyboardInterrupt:
+            app.shutdown()
+        return 0
+
+    undo, log = UndoStack(ws), SessionLog(ws)
+
+    def on_step(step: Step) -> None:
+        print_step(step)
+        log.step(step)
+
+    agent = Agent(ws, planner, max_steps=args.max_steps,
+                  approve=make_approver(args.yolo), on_step=on_step, undo=undo)
+    print(banner(ws, args.yolo, args.planner))
     print("Type an instruction, /help, or /quit.")
 
     while True:
@@ -107,14 +150,16 @@ def main(argv: list[str] | None = None) -> int:
         if not line:
             continue
         if line.startswith("/"):
-            if not handle_slash(line):
+            if not handle_slash(line, undo, log):
                 return 0
             continue
+        log.instruction(line)
         try:
             _, message = agent.run(line)
         except KeyboardInterrupt:
-            print("\n(cancelled)")
-            continue
+            message = "(cancelled)"
+            print()
+        log.final(message)
         print(message)
 
 

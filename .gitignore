@@ -35,3 +35,4 @@ obj/
 .litmus/
 .claude/
 .github/hooks/
+.sonic/
