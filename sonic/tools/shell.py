@@ -66,6 +66,11 @@ def _as_text(data: str | bytes | None) -> str:
 def run_shell(ws: Workspace, command: str, timeout: float = DEFAULT_TIMEOUT) -> ShellResult:
     """Run `command` via the shell with cwd=ws.root.
 
+    If ws.sandboxed: run via sandbox.wrap(command, ws) with sandbox.env(ws); if
+    sandbox.available() is False, raise ToolError telling the user about --no-sandbox.
+    Deletion commands (rm, rmdir, unlink, shred, find -delete, git clean, ...) are
+    denylisted too, so the user gets a clear message instead of a sandbox error.
+
     Raises ToolError for denylisted commands (e.g. 'rm -rf /', 'sudo', 'mkfs', fork bombs).
     Kills the process on timeout. Truncates stdout/stderr past MAX_OUTPUT_CHARS.
     """

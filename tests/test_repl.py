@@ -14,6 +14,7 @@ def sonic(tmp_path, stdin, *flags):
 def test_repl_yolo_executes_instructions(tmp_path):
     out = sonic(tmp_path, "create a.txt with hi then run cat a.txt\n/quit\n", "--yolo")
     assert (tmp_path / "a.txt").read_text() == "hi"
+    assert "sandbox: on" in out
     assert "✓ write_file" in out and "✓ run_shell" in out and "completed 2 step(s)" in out
 
 
