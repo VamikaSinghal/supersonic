@@ -56,8 +56,8 @@ class StubPlanner:
         return Done(f"{msg}, {failed} failed" if failed else msg)
 
 
-HELP = (
-    "Sorry, I didn't understand. Supported commands (chain with 'then'):\n"
+USAGE = (
+    "Supported commands (chain with 'then'):\n"
     "  read <path>\n"
     "  list [<path>]\n"
     "  create <path> with <content>\n"
@@ -66,6 +66,7 @@ HELP = (
     "  run <command>\n"
     "Paths may contain spaces; wrap text in quotes to keep a literal ' then '."
 )
+HELP = "Sorry, I didn't understand. " + USAGE
 
 _VERBS = r"read|show|cat|open|list|ls|create|write|replace|run|exec|execute"
 _THEN = re.compile(r"\s+(?:and\s+)?then\s+(?=(?:" + _VERBS + r")\b)", re.IGNORECASE)

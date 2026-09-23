@@ -4,7 +4,7 @@ import sys
 from typing import Callable
 
 from sonic.agent import Agent
-from sonic.planner import HELP, Action, Planner, Step, StubPlanner
+from sonic.planner import USAGE, Action, Planner, Step, StubPlanner
 from sonic.workspace import Workspace
 
 PROMPT = "sonic> "
@@ -77,7 +77,7 @@ def handle_slash(line: str) -> bool:
     if cmd in ("/quit", "/exit"):
         return False
     if cmd == "/help":
-        print(HELP.removeprefix("Sorry, I didn't understand. "))
+        print(USAGE)
         print(SLASH_HELP)
     else:
         print(f"unknown command {cmd} (try /help)")
