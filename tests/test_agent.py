@@ -57,3 +57,15 @@ def test_nonzero_shell_exit_is_a_failed_step(tmp_path):
     steps, final = agent.run("run exit 2")
     assert steps[0].ok is False and "exit 2" in steps[0].observation
     assert "1 failed" in final
+
+
+# 43
+def test_agent_records_steps_into_context_graph(tmp_path):
+    from sonic.context import ContextGraph
+    ws = Workspace(tmp_path)
+    g = ContextGraph(ws)
+    Agent(ws, StubPlanner(), context=g).run("create notes.md with hello")
+    task = [n for n in g.to_json()["nodes"] if n["type"] == "task"][0]
+    assert "create notes.md" in task["label"]
+    assert "file:notes.md" in [n["id"] for n in g.neighbors(task["id"])]
+    assert ContextGraph(ws).node("file:notes.md") is not None   # saved after the run

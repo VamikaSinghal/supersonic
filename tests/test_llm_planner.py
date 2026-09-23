@@ -55,3 +55,12 @@ def test_from_env_requires_api_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         LLMPlanner.from_env()
+
+
+# 44
+def test_llm_planner_injects_graph_context_into_system_prompt():
+    sent = []
+    planner = LLMPlanner(client=lambda body: (sent.append(body), response({"type": "text", "text": "ok"}))[1],
+                         context=lambda query: f"CTX[{query}]")
+    planner.next_action("fix the login bug", [])
+    assert "CTX[fix the login bug]" in sent[0]["system"]

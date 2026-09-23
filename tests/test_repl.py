@@ -58,3 +58,13 @@ def test_repl_llm_planner_without_key_explains_and_exits(tmp_path, monkeypatch):
                        input="", capture_output=True, text=True, timeout=20)
     assert r.returncode != 0
     assert "ANTHROPIC_API_KEY" in r.stdout + r.stderr
+
+
+# 45
+def test_repl_remember_and_context(tmp_path):
+    (tmp_path / "auth.py").write_text("x = 1\n")
+    out = sonic(tmp_path, "/remember auth.py uses JWT #security\n/context jwt\n/brain\n", "--yolo")
+    assert "remembered" in out.lower()
+    after = out.split("/context")[-1] if "/context" in out else out
+    assert "JWT" in after and "auth.py" in after
+    assert (tmp_path / ".sonic" / "context" / "graph.json").exists()
