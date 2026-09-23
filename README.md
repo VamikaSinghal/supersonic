@@ -1,85 +1,48 @@
 # Supersonic
 
-A local coding harness you can trust with your machine: it plans, asks before it changes anything, shows you a diff, **can't delete your files**, and can undo every change it made.
+A local coding harness you can trust with your machine. It plans, asks before it changes anything, shows you a diff, **can't delete your files**, undoes its own changes, and keeps a second brain of your project.
 
 ```bash
-uv venv -p 3.12 .venv && uv pip install --python .venv/bin/python pytest   # one-time
+uv venv -p 3.12 .venv && uv pip install --python .venv/bin/python pytest   # one-time setup
 .venv/bin/python -m sonic --root ./playground          # terminal REPL
-.venv/bin/python -m sonic --root ./playground --web    # local web UI → http://127.0.0.1:8765
+.venv/bin/python -m sonic --root ./playground --web    # web UI → http://127.0.0.1:8765
 ```
 
-Standard library only (Python 3.12). `pytest` is the only dev dependency.
+Python 3.12, standard library only. `pytest` is the only dev dependency.
 
-## Try it
+## Features
 
-```
-sonic> create hello.py with print('hi') then run python3 hello.py
-write_file hello.py (11 bytes)
-  allow? [y/n/a] y
-✓ write_file → wrote 11 bytes to hello.py
-run_shell: python3 hello.py
-  allow? [y/n/a] y
-✓ run_shell → exit 0
-    --- stdout ---
-    hi
-completed 2 step(s)
-sonic> replace hi with hello in hello.py
-sonic> /undo
-undid edit_file hello.py (replaced version moved to .sonic/trash/1/hello.py)
-sonic> run rm hello.py
-✗ run_shell → error: command blocked by denylist (deletion is disabled in Supersonic)
-```
-
-| Instruction (chain with `then`) | Tool |
+| | |
 |---|---|
-| `read <path>` · `list [<path>]` | read_file · list_dir (no approval needed) |
-| `create <path> with <content>` · `write <content> to <path>` | write_file |
-| `replace <old> with <new> in <path>` | edit_file (must match exactly once) |
-| `run <command>` | run_shell (sandboxed) |
+| **Agent loop** | plan → check args → approve → snapshot → execute → observe, repeated up to `--max-steps`. Tool errors, denials and non-zero exits become failed steps; they never crash the loop. |
+| **Tools** | `read_file`, `list_dir`, `write_file`, `edit_file` (the old text must match exactly once), `run_shell` (timeout, output truncation). |
+| **Swappable planner** | `StubPlanner` (rule-based, the default) and `LLMPlanner` (Anthropic tool use, `--planner llm` + `ANTHROPIC_API_KEY`) share one `Planner` protocol. Nothing else changes when you swap them. |
+| **Approvals** | Reads run straight away. Writes, edits and shell commands ask `y` / `n` / `a` (always). `--yolo` skips asking. |
+| **No-deletion safety** | See [Safety](#safety). |
+| **Undo** | `/undo` (or the web Undo button) reverts the last write or edit. The replaced version is moved to `.sonic/trash/`, so nothing is ever destroyed. |
+| **Second brain** | A context graph in `.sonic/context/graph.json` (details below). |
+| **Session log** | One JSONL file per session in `.sonic/sessions/`. `/log` shows the recent steps. |
+| **Web UI** | Light theme in the style of Claude. Chat-style timeline, a diff with line numbers before each approval (Enter to allow, Esc to deny), undo, and a **Brain** tab: an interactive graph with search, remember, forget, and filters. Works on phone-width screens. |
+| **REPL** | `/undo` · `/log` · `/remember <fact>` · `/context <query>` · `/brain` · `/help` · `/quit` |
 
-Paths may contain spaces; quotes keep a literal ` then ` inside text.
-Slash commands: `/undo`, `/log`, `/remember <fact>`, `/context <query>`, `/brain`, `/help`, `/quit`.
+**Stub planner grammar** (chain steps with `then`): `read <path>` · `list [<path>]` · `create <path> with <text>` · `write <text> to <path>` · `replace <old> with <new> in <path>` · `run <command>`. Paths may contain spaces, and quotes protect a literal ` then `.
 
-Flags: `--yolo` (skip approvals) · `--no-sandbox` · `--max-steps N` · `--planner stub|llm` · `--web [--port N]`.
+### Second brain
 
-## How it works
-
-```
- instruction ─▶ Planner ──Action──▶ Agent loop ──approve?──▶ Tool ──▶ Step(ok, observation)
-                  ▲                    │   └─ UndoStack snapshot (write/edit)       │
-                  └──── history ◀──────┴──────────── SessionLog (.sonic/sessions) ◀─┘
-```
-
-- **`sonic/planner.py`**: the `Planner` protocol (`next_action(instruction, history) -> Action | Done`) and `StubPlanner`, a rule-based stand-in for a model.
-- **`sonic/llm_planner.py`**: `LLMPlanner`, the same protocol backed by the Anthropic Messages API with tool use. Run it with `--planner llm` and `ANTHROPIC_API_KEY`. The HTTP client is injected, so tests use a fake. Swapping planners changes nothing else.
-- **`sonic/agent.py`**: the loop: plan → validate args → approve → snapshot → execute → observe, capped at `max_steps`. Tool errors, denials and non-zero exits become failed steps, never crashes.
-- **`sonic/tools/`**: `fs.py` (read/list/write/edit, sandboxed to the workspace) and `shell.py` (timeouts, output truncation, denylist).
-- **`sonic/undo.py`**: undo stack. Undo *moves* the current version to `.sonic/trash/<n>/` and restores the previous one. Nothing is destroyed.
-- **`sonic/log.py`**: one JSONL file per session in `.sonic/sessions/`.
-- **`sonic/web.py` + `sonic/static/index.html`**: the local web UI (timeline, diff-before-approve, undo button). It binds to 127.0.0.1 only, POSTs need a per-session token, and requests with a foreign `Host` header are refused.
-
-## Second brain: the context graph
-
-`sonic/context.py` keeps a local graph at `.sonic/context/graph.json`. Nothing leaves your machine.
-
-- **Captured automatically:** each instruction becomes a task node linked to the files it read, wrote or edited and the commands it ran. Python files are parsed, so functions, classes and imports become nodes and links (import links resolve even when the target is created later).
+- **Captured automatically:** each instruction becomes a task node, linked to the files it read, wrote or edited and the commands it ran. Python files are parsed, so functions, classes and imports become nodes and links.
 - **Your notes:** `/remember auth.py uses JWT #security` stores a note linked to `auth.py` and `#security`.
-- **Recall:** `relevant(query)` ranks your notes first, then connected files, code and recent tasks. The LLM planner gets this in its system prompt, and `/context <query>` shows you exactly what it sees.
-- **Forget** archives a node; it is never erased.
-- **Web:** `GET /api/graph`, `GET /api/context?q=`, `POST /api/remember`, `POST /api/forget`.
+- **Recall:** your notes rank first, then connected files, code and recent tasks. The LLM planner gets this in its system prompt, and `/context <query>` shows you exactly what it sees.
+- **Forget** archives a node and never erases it. Everything stays on your machine.
 
-## Safety model: no deletion, anywhere
+### Safety
 
 | Layer | What it does |
 |---|---|
-| **Kernel sandbox** (`sonic/sandbox.py`) | Every shell command runs under macOS `sandbox-exec`. Deleting, renaming over, or unlinking any file is denied by the OS, including via `eval`, base64, or `python -c`. Writes outside the workspace are denied. Only a private scratch `$TMPDIR` allows deletion. |
-| **Fail closed** | No sandbox available (e.g. Linux) → shell commands are refused unless you pass `--no-sandbox`. |
-| **Denylist** | `rm`, `rmdir`, `unlink`, `shred`, `find -delete`, `git clean`, `sudo`, `mkfs`, fork bombs, also inside `bash -c` / `eval` / decoded pipes, are blocked with a clear message before anything runs. |
-| **Workspace jail** | File tools resolve symlinks and reject `../`, absolute paths, and escapes. There is no delete tool. |
-| **Approvals** | Writes, edits and shell commands need `y` / `n` / `a` (always). Reads don't. |
-| **Undo** | Every write/edit can be undone; replaced versions go to `.sonic/trash`. |
-
-Known trade-off: because rename-over counts as deletion, tools that save by writing a temp file and renaming it (git, some editors, package managers) can't write inside the sandboxed workspace. Run them outside the harness, or use `--no-sandbox` deliberately.
+| **Kernel sandbox** | Shell commands run under macOS `sandbox-exec`. The OS denies deleting, unlinking, or renaming over any file, even via `eval`, base64, or `python -c`. Writes outside the workspace are denied. |
+| **Fail closed** | No sandbox available → shell commands are refused unless you pass `--no-sandbox`. |
+| **Denylist** | `rm`, `rmdir`, `unlink`, `shred`, `find -delete`, `git clean`, `sudo`, `mkfs` and fork bombs are blocked with a clear message, including inside `bash -c`, `eval`, and decoded pipes. |
+| **Workspace jail** | File tools reject `../`, absolute paths, and symlink escapes. There is no delete tool. |
+| **Web** | Binds to 127.0.0.1 only, POSTs need a per-session token, and foreign `Host` headers are refused. |
 
 ## Tests
 
@@ -87,9 +50,40 @@ Known trade-off: because rename-over counts as deletion, tools that save by writ
 .venv/bin/python -m pytest -q
 ```
 
-Every test runs with a fake `HOME`. Denylist tests replace `subprocess` with a guard, so a regression fails the test instead of running the command. Sandbox tests only target throwaway canary files.
+Tests were written before each feature. Safety rules for the suite itself:
+- `HOME` is faked for every test.
+- Denylist tests replace `subprocess` with a guard, so a regression fails the test instead of running the command.
+- Sandbox tests only target throwaway canary files.
 
-## Original brief
+## Assumptions
+
+- **Local and single-user:** you run it on your own machine, on your own code.
+- **macOS for the full sandbox:** other platforms fail closed unless you pass `--no-sandbox`.
+- **No API key by default:** the rule-based stub planner stands in for the model. The LLM planner is fully wired but was only tested against a fake client.
+- **The workspace is the boundary:** the harness may touch only `--root` (default: the current directory).
+- **Deleting a file is never acceptable,** so undo moves files to trash and "forget" archives.
+
+## Trade-offs
+
+- **Strict no-deletion breaks some tools.** Git, some editors and package managers save by writing a temp file and renaming it over the original, which the sandbox counts as a delete. Inside the harness, they fail.
+- **Shell changes can't be undone.** `/undo` covers the harness's own file tools only. The sandbox prevents deletion, but a shell command can still overwrite a workspace file.
+- **The denylist is best-effort.** It only reads command text and can have false positives. The kernel sandbox is the real guarantee.
+- **Stdlib only.** Zero install friction, at the cost of hand-rolled pieces: web polling instead of WebSockets, and a canvas graph without a library.
+- **Retrieval is keyword + graph, not embeddings.** It's explainable and offline, but less semantic.
+- **Last writer wins on the graph file** if two harness processes share one workspace.
+- **The stub grammar is narrow.** Unquoted paths can't contain `with`, `in`, or `to`.
+
+## With more time
+
+1. **Multi-agent coordination:** a lead planner that splits a task across workers in isolated workspaces, with file ownership, a shared context graph, review-then-merge, and one approval lane per agent in the web UI.
+2. **Undo for shell changes:** a copy-on-write snapshot of the workspace before each shell step.
+3. **Linux sandbox** (Landlock or bubblewrap), plus an opt-in "git-safe" profile that allows rename-over inside `.git/`.
+4. **Real LLM runs:** streaming output, prompt caching, token budgets, and an eval set of coding tasks.
+5. **Smarter memory:** embeddings alongside keyword retrieval, automatic file summaries, un-archive, and session resume from the graph.
+6. **Web hardening:** edge-case tests for the web API and live streaming of shell output.
+
+<details>
+<summary>Original assessment brief</summary>
 
 ### Problem Statement
 
@@ -137,4 +131,5 @@ The video has a single prompt: **"Explain what you made."** There is no question
 litmus submit
 ```
 
-After submitting, your browser will direct you to the recording interface where you'll demo your work. 
+After submitting, your browser will direct you to the recording interface where you'll demo your work.
+</details>
