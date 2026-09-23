@@ -41,7 +41,7 @@ Python 3.12, standard library only. `pytest` is the only dev dependency.
 | **Kernel sandbox** | Shell commands run under macOS `sandbox-exec`. The OS denies deleting, unlinking, or renaming over any file, even via `eval`, base64, or `python -c`. Writes outside the workspace are denied. |
 | **Fail closed** | No sandbox available → shell commands are refused unless you pass `--no-sandbox`. |
 | **Denylist** | `rm`, `rmdir`, `unlink`, `shred`, `find -delete`, `git clean`, `sudo`, `mkfs` and fork bombs are blocked with a clear message, including inside `bash -c`, `eval`, and decoded pipes. |
-| **Workspace jail** | File tools reject `../`, absolute paths, and symlink escapes. There is no delete tool. |
+| **Workspace jail** | File tools reject `../`, absolute paths, and symlink escapes. There is no delete tool. The harness's own `.sonic/` folder (graph, trash, logs) is read-only to the agent, for file tools and shell alike. |
 | **Web** | Binds to 127.0.0.1 only, POSTs need a per-session token, and foreign `Host` headers are refused. |
 
 ## Tests
@@ -50,7 +50,7 @@ Python 3.12, standard library only. `pytest` is the only dev dependency.
 .venv/bin/python -m pytest -q
 ```
 
-Tests were written before each feature. Safety rules for the suite itself:
+403 tests, written before each feature, plus four edge-case rounds (file tools, shell/sandbox, agent/planners, graph/CLI) that found and fixed about 50 bugs. Safety rules for the suite itself:
 - `HOME` is faked for every test.
 - Denylist tests replace `subprocess` with a guard, so a regression fails the test instead of running the command.
 - Sandbox tests only target throwaway canary files.

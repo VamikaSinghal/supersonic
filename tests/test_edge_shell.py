@@ -183,8 +183,13 @@ def test_oversized_command_is_tool_error_not_oserror(tmp_path, sandboxed):
 
 
 def test_missing_workspace_root_is_tool_error(tmp_path):
+    """Workspace() rejects a missing root up front, so simulate the root vanishing later (moved, never deleted)."""
+    root = tmp_path / "gone"
+    root.mkdir()
+    ws = Workspace(root, sandboxed=False)
+    root.rename(tmp_path / "moved")
     with pytest.raises(ToolError):
-        run_shell(Workspace(tmp_path / "gone", sandboxed=False), "echo hi")
+        run_shell(ws, "echo hi")
 
 
 def test_undecodable_surrogates_are_tool_error_or_run(tmp_path):
