@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / TypeScript
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Go
+/bin/
+*.exe
+
+# Java
+target/
+*.class
+
+# .NET
+bin/
+obj/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Env / secrets
+.env
+.env.local
+
+.litmus/
+.claude/
+.github/hooks/
