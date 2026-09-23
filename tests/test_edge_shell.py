@@ -140,10 +140,32 @@ def test_100kb_command_runs(tmp_path, sandboxed):
     assert r.exit_code == 0 and r.stdout.startswith("aaaa")
 
 
-@pytest.mark.parametrize("body", [
-    "a" * 100_000, "a:" * 50_000, "x() " * 25_000, "find . " * 15_000,
-    "base64 -d " * 10_000, "dd " * 30_000, "`" * 100_000, '"' * 100_001, "$(" * 50_000,
-])
+_LONG_BODIES = {
+    "word": "a" * 100_000, "colons": "a:" * 50_000, "funcs": "x() " * 25_000,
+    "finds": "find . " * 15_000, "base64": "base64 -d " * 10_000,
+    "base64-pipes": "base64 -d |" * 10_000, "dds": "dd " * 30_000, "backticks": "`" * 100_000,
+    "dquotes": '"' * 100_001, "substs": "$(" * 50_000,
+}
+# Shapes that put a command word in command position: checked by the denylist only, never run.
+_LONG_COMMANDS = {
+    "git-opts": "git " + "-C " * 30_000 + "status",
+    "rm-opts": "echo; rm " + "--a " * 25_000 + "canary",
+    "py-imports": "python3 -c '" + "from os import x " * 5_000 + "'",
+    "semicolons": ";" * 100_000, "slashes": "/" * 100_000, "env-chain": "env " * 25_000,
+}
+
+
+@pytest.mark.parametrize("cmd", list(_LONG_COMMANDS.values()), ids=list(_LONG_COMMANDS))
+def test_denylist_scan_of_long_commands_is_linear(cmd):
+    start = time.monotonic()
+    try:
+        shell._check_denylist(cmd)
+    except ToolError:
+        pass
+    assert time.monotonic() - start < 5
+
+
+@pytest.mark.parametrize("body", list(_LONG_BODIES.values()), ids=list(_LONG_BODIES))
 def test_long_pathological_commands_finish_fast(tmp_path, body):
     start = time.monotonic()
     try:
