@@ -39,6 +39,8 @@ class StubPlanner:
       create <path> with <content> | write <content> to <path>
       replace <old> with <new> in <path>
       run <command>
+    Paths may contain spaces unquoted, or be quoted. Chaining only splits
+    outside quotes and before a command verb, so quote to keep ' then ' literal.
     Returns actions one at a time based on len(history); returns Done when finished.
     Unrecognised instructions return Done with a help message.
     """
@@ -61,11 +63,37 @@ HELP = (
     "  create <path> with <content>\n"
     "  write <content> to <path>\n"
     "  replace <old> with <new> in <path>\n"
-    "  run <command>"
+    "  run <command>\n"
+    "Paths may contain spaces; wrap text in quotes to keep a literal ' then '."
 )
 
-_SPLIT = re.compile(r"\s+(?:and\s+)?then\s+", re.IGNORECASE)
-_PATH = r"(?P<path>'[^']+'|\"[^\"]+\"|\S+)"
+_VERBS = r"read|show|cat|open|list|ls|create|write|replace|run|exec|execute"
+_THEN = re.compile(r"\s+(?:and\s+)?then\s+(?=(?:" + _VERBS + r")\b)", re.IGNORECASE)
+_QUOTED = r"'[^']+'|\"[^\"]+\""
+_ANY_PATH = r"(?P<path>.+)"
+_PATH = r"(?P<path>" + _QUOTED + r"|[^'\"]+)"
+_LAZY_PATH = r"(?P<path>" + _QUOTED + r"|[^'\"]+?)"
+
+
+def _split(instruction: str) -> list[str]:
+    """Split on ' then ' outside quotes when a command verb follows.
+
+    A quote after a letter or digit (e.g. don't) is treated as an apostrophe.
+    """
+    clauses, start, quote, i = [], 0, "", 0
+    while i < len(instruction):
+        c = instruction[i]
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"" and not (i and instruction[i - 1].isalnum()):
+            quote = c
+        elif m := _THEN.match(instruction, i):
+            clauses.append(instruction[start:i])
+            start = i = m.end()
+            continue
+        i += 1
+    clauses.append(instruction[start:])
+    return clauses
 
 
 def _unquote(s: str) -> str:
@@ -86,14 +114,14 @@ def _rule(pattern: str) -> re.Pattern[str]:
 
 
 _RULES: list[tuple[re.Pattern[str], Callable[[re.Match[str]], Action]]] = [
-    (_rule(r"(?:read|show|cat|open)\s+" + _PATH),
+    (_rule(r"(?:read|show|cat|open)\s+" + _ANY_PATH),
      lambda m: Action("read_file", {"path": _unquote(m["path"])})),
-    (_rule(r"(?:list|ls)(?:\s+" + _PATH + ")?"),
+    (_rule(r"(?:list|ls)(?:\s+" + _ANY_PATH + ")?"),
      lambda m: Action("list_dir", {"path": _unquote(m["path"] or ".")})),
     (_rule(r"replace\s+(?P<old>.+?)\s+with\s+(?P<new>.+)\s+in\s+" + _PATH),
      lambda m: Action("edit_file", {"path": _unquote(m["path"]),
                                     "old": _text(m["old"]), "new": _text(m["new"])})),
-    (_rule(r"(?:create|write)\s+" + _PATH + r"\s+with\s+(?P<content>.*)"),
+    (_rule(r"(?:create|write)\s+" + _LAZY_PATH + r"\s+with\s+(?P<content>.*)"),
      lambda m: Action("write_file", {"path": _unquote(m["path"]), "content": _text(m["content"])})),
     (_rule(r"write\s+(?P<content>.*)\s+to\s+" + _PATH),
      lambda m: Action("write_file", {"path": _unquote(m["path"]), "content": _text(m["content"])})),
@@ -105,7 +133,7 @@ _RULES: list[tuple[re.Pattern[str], Callable[[re.Match[str]], Action]]] = [
 def _parse(instruction: str) -> list[Action] | None:
     """Turn an instruction into actions; None if any clause is unrecognised."""
     actions = []
-    for clause in _SPLIT.split(instruction.strip()):
+    for clause in _split(instruction.strip()):
         for pattern, build in _RULES:
             if m := pattern.fullmatch(clause.strip()):
                 actions.append(build(m))
