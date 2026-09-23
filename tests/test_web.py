@@ -89,3 +89,28 @@ def test_web_deny_then_undo(app, tmp_path):
     status, body = call(app, "POST", "/api/undo")
     assert status == 200 and "b.txt" in body["message"]
     assert not (tmp_path / "b.txt").exists() and (tmp_path / ".sonic" / "trash").exists()
+
+
+# 46
+def test_web_brain_api_graph_remember_context(app, tmp_path):
+    (tmp_path / "auth.py").write_text("x = 1\n")
+    status, body = call(app, "POST", "/api/remember", {"text": "auth.py uses JWT #security"})
+    assert status == 200 and body["id"].startswith("note:")
+    status, graph = call(app, "GET", "/api/graph")
+    ids = {n["id"] for n in graph["nodes"]}
+    assert {"file:auth.py", "topic:security", body["id"]} <= ids
+    assert all({"src", "dst", "rel"} <= set(e) for e in graph["edges"])
+    status, ctx = call(app, "GET", "/api/context?q=jwt")
+    assert status == 200 and "JWT" in ctx["text"] and ctx["nodes"][0]["id"] == body["id"]
+    assert call(app, "POST", "/api/remember", {"text": "x"}, token=False)[0] == 403
+
+
+# 47
+def test_web_runs_feed_the_graph(app, tmp_path):
+    call(app, "POST", "/api/run", {"instruction": "create notes.md with hi"})
+    req, _ = wait_for(app, "approval_request")
+    call(app, "POST", "/api/approve", {"id": req["id"], "decision": "y"})
+    wait_for(app, "final")
+    _, graph = call(app, "GET", "/api/graph")
+    assert "file:notes.md" in {n["id"] for n in graph["nodes"]}
+    assert any(n["type"] == "task" for n in graph["nodes"])
