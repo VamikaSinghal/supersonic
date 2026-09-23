@@ -6,6 +6,7 @@ use a fake and production uses `from_env()` (stdlib urllib, ANTHROPIC_API_KEY).
 """
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -16,6 +17,7 @@ DEFAULT_MODEL = "claude-opus-5-5"
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 HTTP_TIMEOUT = 120
+MAX_TOOL_RESULT_CHARS = 20_000  # per tool_result in the request; longer observations are clipped
 
 SYSTEM_PROMPT = """\
 You are Supersonic's planner: a coding agent working inside a single project workspace.
@@ -143,7 +145,7 @@ class LLMPlanner:
     @classmethod
     def from_env(cls, context: Callable[[str], str] | None = None) -> "LLMPlanner":
         """Real client via urllib. RuntimeError mentioning ANTHROPIC_API_KEY if it is unset."""
-        key = os.environ.get("ANTHROPIC_API_KEY")
+        key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         if not key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set; export it to use the LLM planner")
         return cls(_http_client(key), model=os.environ.get("SONIC_MODEL") or DEFAULT_MODEL, context=context)
@@ -155,19 +157,25 @@ class LLMPlanner:
         tool_use block (id f"toolu_{i}") and a user turn with the matching tool_result
         (content = observation, is_error = not ok).
         """
-        messages: list[dict] = [{"role": "user", "content": instruction}]
+        messages: list[dict] = [{"role": "user", "content": instruction or "(empty instruction)"}]
         for i, step in enumerate(history):
             tool_id = f"toolu_{i}"
+            args = step.action.args if isinstance(step.action.args, dict) else {}
             messages.append({"role": "assistant", "content": [
-                {"type": "tool_use", "id": tool_id, "name": step.action.tool, "input": step.action.args},
+                {"type": "tool_use", "id": tool_id, "name": str(step.action.tool), "input": args},
             ]})
             messages.append({"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tool_id,
-                 "content": step.observation, "is_error": not step.ok},
+                 "content": _clip(str(step.observation)), "is_error": not step.ok},
             ]})
         system = SYSTEM_PROMPT
-        recalled = self.context(instruction) if self.context else ""
-        if recalled:
+        recalled = ""
+        if self.context:
+            try:
+                recalled = self.context(instruction)
+            except Exception as e:
+                print(f"warning: context lookup failed: {type(e).__name__}: {e}", file=sys.stderr)
+        if recalled and isinstance(recalled, str):
             system += "\n\nRelevant context from the user's second brain (files, notes, past tasks):\n" + recalled
         return {
             "model": self.model,
@@ -178,13 +186,46 @@ class LLMPlanner:
         }
 
     def next_action(self, instruction: str, history: list[Step]) -> Action | Done:
-        """First tool_use block -> Action(name, input). No tool_use -> Done(joined text)."""
-        response = self.client(self.build_request(instruction, history))
-        blocks = response.get("content") or []
+        """First tool_use block -> Action(name, input). No tool_use -> Done(joined text).
+
+        Any client failure surfaces as RuntimeError (KeyboardInterrupt passes through).
+        Malformed responses degrade: a missing/non-dict tool input becomes {}, a missing
+        name becomes "" (the agent reports an unknown tool), non-dict blocks are skipped.
+        """
+        body = self.build_request(instruction, history)
+        try:
+            response = self.client(body)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"LLM request failed: {type(e).__name__}: {e}") from e
+        if not isinstance(response, dict):
+            raise RuntimeError(f"LLM returned an unexpected response: {type(response).__name__}")
+        content = response.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        elif isinstance(content, dict):
+            content = [content]
+        elif not isinstance(content, list):
+            content = []
+        blocks = [b for b in content if isinstance(b, dict)]
         for block in blocks:
             if block.get("type") == "tool_use":
-                return Action(block["name"], dict(block.get("input") or {}))
-        text = "\n".join(b["text"] for b in blocks if b.get("type") == "text" and b.get("text")).strip()
-        if not text and response.get("stop_reason") == "refusal":
+                args = block.get("input")
+                return Action(str(block.get("name") or ""), dict(args) if isinstance(args, dict) else {})
+        text = "\n".join(b["text"] for b in blocks
+                         if b.get("type") == "text" and isinstance(b.get("text"), str) and b["text"]).strip()
+        stop = response.get("stop_reason")
+        if not text and stop == "refusal":
             return Done("(model refused the request)")
+        if stop == "max_tokens":
+            return Done(f"{text}\n(response was cut off: hit max_tokens)".strip())
         return Done(text or "(no response)")
+
+
+def _clip(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Keep a tool_result small enough for the request: head and tail around a marker."""
+    if len(text) <= limit:
+        return text
+    head, tail = text[: limit * 3 // 4], text[-(limit // 4):]
+    return f"{head}\n[... truncated {len(text) - len(head) - len(tail)} of {len(text)} chars ...]\n{tail}"
